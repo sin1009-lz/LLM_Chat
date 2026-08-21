@@ -27,6 +27,25 @@ import 'markdown_view.dart';
 import 'mcp.dart';
 import 'settings_page.dart';
 
+/// ── 模型复合身份（方案 A）──
+/// 模型唯一键 = (提供方名, 模型 id) 二元组。
+/// 运行时以编码字符串传递/存储（JSON 数组，避免用户输入的分隔符冲突），
+/// 需还原时用 [_decodeModelKey] 解析。
+typedef ModelKey = ({String provider, String id});
+
+String _encodeModelKey(String provider, String id) =>
+    jsonEncode([provider, id]);
+
+ModelKey? _decodeModelKey(String s) {
+  try {
+    final j = jsonDecode(s);
+    if (j is List && j.length == 2 && j[0] is String && j[1] is String) {
+      return (provider: j[0], id: j[1]);
+    }
+  } catch (_) {}
+  return null;
+}
+
 /// 品牌色：亮色模式与暗色模式各一份
 const Color kBrandColorLight = Color(0xFF3D5AFE);
 const Color kBrandColorDark = Color(0xFF8C9EFF);
@@ -356,44 +375,64 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   /// 思考深度状态：0 关闭 / 1 开启 / 2 最高
   int _thinkingDepth = 0;
 
-  /// 页眉模型选择：当前模型名（来自设置页提供方，默认无）
+  /// 页眉模型选择：当前模型名（裸 id，来自设置页提供方，默认无）
   String _modelName = '';
+
+  /// 当前模型的归属提供方名（与 [_modelName] 合成模型唯一身份）
+  String _currentProviderName = '';
+
+  /// 当前模型复合键（provider + id 的编码串；空 = 未选模型）
+  String get _currentKey =>
+      _modelName.isEmpty ? '' : _encodeModelKey(_currentProviderName, _modelName);
 
   /// 模型提供方列表（设置页配置，持久化；默认预置无模型）
   List<ModelProvider> _providers = [];
 
-  /// 可选模型列表（从提供方收集；默认空，需在设置页手动获取模型）
+  /// 模型索引：复合键 → 提供方（运行时物化，变更时重建，查询 O(1)）
+  Map<String, ModelProvider> _modelIndex = {};
+
+  /// 可选模型列表（裸 id 集合，供设置页 AI 标题选择等"按名"消费方使用）
   List<String> get _models => [
     for (final p in _providers)
       for (final m in p.models) m.id,
   ];
 
-  /// 按模型名查找所属提供方（用于请求 baseUrl/apiKey）
-  ModelProvider? _providerFor(String modelId) {
-    for (final p in _providers) {
+  /// 模型下拉选项：复合键集合（唯一、可区分重名），索引重建时同步更新
+  List<String> get _modelKeys => _modelIndex.keys.toList();
+
+  /// 按复合键查所属提供方（O(1)）
+  ModelProvider? _providerFor(String key) => _modelIndex[key];
+
+  /// 复合键显示标签：显示名优先；无显示名且重名时加提供方前缀消歧
+  String _labelForKey(String key) {
+    final k = _decodeModelKey(key);
+    if (k == null) return key;
+    final p = _modelIndex[key];
+    if (p != null) {
       for (final m in p.models) {
-        if (m.id == modelId) return p;
+        if (m.id == k.id && m.displayName != null && m.displayName!.isNotEmpty) {
+          return m.displayName!;
+        }
       }
     }
-    return null;
+    final dup =
+        _modelIndex.keys.where((x) => _decodeModelKey(x)?.id == k.id).length > 1;
+    return dup ? '${k.provider}/${k.id}' : k.id;
   }
 
-  /// 当前模型的显示名（设置页配置；无显示名时回退模型 ID）
-  String? get _displayNameForCurrentModel {
-    final p = _providerFor(_modelName);
-    if (p == null) return null;
-    for (final m in p.models) {
-      if (m.id == _modelName) {
-        final dn = m.displayName;
-        if (dn != null && dn.isNotEmpty) return dn;
-      }
-    }
-    return null;
+  /// 重建模型索引：仅在 _providers 变更的两个入口调用（启动加载、设置页回调）。
+  /// 注意（方案 A 约束）：身份绑定于 provider.name——若未来开放"提供方改名"，
+  /// 需在该改名点同步迁移 model_name 存档与重建索引。
+  void _rebuildModelIndex() {
+    _modelIndex = {
+      for (final p in _providers)
+        for (final m in p.models) _encodeModelKey(p.name, m.id): p,
+    };
   }
 
   /// 按当前模型构建 LLM 服务（提供方配置；无模型返回 null）
   LlmService? _buildLlm() {
-    final provider = _providerFor(_modelName);
+    final provider = _providerFor(_currentKey);
     if (provider == null || provider.baseUrl.isEmpty) return null;
     return LlmService(baseUrl: provider.baseUrl, apiKey: provider.apiKey);
   }
@@ -910,10 +949,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Future<String> _webSearch(String query) async {
     final q = query.trim();
     if (q.isEmpty) return '搜索失败：查询词为空';
-    final provider = _providerFor(_modelName);
-    if (provider == null || provider.apiKey.isEmpty) {
-      return '搜索失败：当前模型提供方未配置 API Key';
+    // 搜索绑死 DeepSeek 服务商：key 固定取 DeepSeek 提供方（预置不可删），
+    // 与当前聊天模型所属提供方解耦——Kimi/Qwen/GLM 聊天时搜索照样可用
+    ModelProvider? dsProvider;
+    for (final p in _providers) {
+      if (p.name == 'DeepSeek') {
+        dsProvider = p;
+        break;
+      }
     }
+    if (dsProvider == null || dsProvider.apiKey.isEmpty) {
+      return '搜索失败：未配置 DeepSeek 服务商的 API Key（设置→模型提供方→DeepSeek）';
+    }
+    final apiKey = dsProvider.apiKey;
     // DeepSeek 搜索专用端点（Anthropic 格式，与聊天端点不同）
     const endpoint = 'https://api.deepseek.com/anthropic/v1/messages';
     try {
@@ -921,8 +969,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           .post(
             Uri.parse(endpoint),
             headers: {
-              'x-api-key': provider.apiKey,
-              'authorization': 'Bearer ${provider.apiKey}',
+              'x-api-key': apiKey,
+              'authorization': 'Bearer $apiKey',
               'anthropic-version': '2023-06-01',
               'content-type': 'application/json',
               'accept': 'application/json',
@@ -2516,9 +2564,18 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             // 提供方/模型变更：立即生效（模型下拉/请求路由）+ 固化存档
             setState(() {
               _providers = List.of(providers);
+              _rebuildModelIndex();
               // 当前模型被移除（提供方删除/模型删除）→ 回退到第一个模型
-              if (_modelName.isNotEmpty && _providerFor(_modelName) == null) {
-                _modelName = _models.isEmpty ? '' : _models.first;
+              if (_modelName.isNotEmpty && !_modelIndex.containsKey(_currentKey)) {
+                if (_modelKeys.isEmpty) {
+                  _currentProviderName = '';
+                  _modelName = '';
+                } else {
+                  final f = _decodeModelKey(_modelKeys.first)!;
+                  _currentProviderName = f.provider;
+                  _modelName = f.id;
+                  _store?.saveModelName(_encodeModelKey(f.provider, f.id));
+                }
               }
             });
             _store?.saveProviders(providers);
@@ -2564,15 +2621,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
-  /// 当前模型显示文本：优先显示名（设置页配置），否则模型 ID
+  /// 当前模型显示文本：优先显示名（设置页配置），否则模型 ID（重名加前缀）
   String get _modelLabel {
     if (_modelName.isEmpty) return '未选模型';
-    return _displayNameForCurrentModel ?? _modelName;
+    return _labelForKey(_currentKey);
   }
 
-  /// 下拉栏显示的模型：过滤掉当前已选模型
+  /// 下拉栏显示的模型：复合键列表，过滤掉当前已选
   List<String> get _visibleModels =>
-      _models.where((m) => m != _modelName).toList();
+      _modelKeys.where((m) => m != _currentKey).toList();
 
   /// 历史列表可见项：非归档 + 搜索标题过滤
   List<Conversation> get _visibleHistory {
@@ -2587,18 +2644,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   /// 可见历史项数（批量全选用）
   int get _visibleHistoryCount => _visibleHistory.length;
 
-  /// 下拉栏模型显示文本：与页眉一致，有显示名时只显示显示名，否则 ID
-  String _modelDisplayText(String id) {
-    for (final p in _providers) {
-      for (final m in p.models) {
-        if (m.id == id) {
-          final dn = m.displayName;
-          if (dn != null && dn.isNotEmpty) return dn;
-        }
-      }
-    }
-    return id;
-  }
+  /// 下拉栏模型显示文本：与页眉一致（复合键 → 标签）
+  String _modelDisplayText(String key) => _labelForKey(key);
 
   /// 已选附件（图片/文件）
   final List<_Attachment> _attachments = [];
@@ -2683,12 +2730,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   List<String>? get _currentMcpIds =>
       _currentConversation?.mcpServerIds ?? _pendingMcpIds;
 
-  /// 当前模型（按页眉选择查找）
+  /// 当前模型（按复合身份从索引定位）
   ProviderModel? get _currentModel {
-    for (final p in _providers) {
-      for (final m in p.models) {
-        if (m.id == _modelName) return m;
-      }
+    final key = _currentKey;
+    if (key.isEmpty) return null;
+    final p = _modelIndex[key];
+    if (p == null) return null;
+    for (final m in p.models) {
+      if (m.id == _modelName) return m;
     }
     return null;
   }
@@ -3057,12 +3106,47 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         _mcpServers = s.loadMcpServers();
         // 模型提供方（设置页）启动时恢复；默认预置无模型 → 需手动获取
         _providers = s.loadProviders();
-        // 恢复最后使用的模型（软件重启不重置）；
+        // 重建索引：后续恢复当前模型与查询都依赖它
+        _rebuildModelIndex();
+        // 恢复最后使用的模型（软件重启不重置）：
+        // v2 复合键直接解析；v1 老裸 id 按名回退补全归属并写回升级；
         // 已删除/不存在的模型回退到第一个
         final savedModel = s.loadModelName();
-        _modelName = savedModel.isNotEmpty && _providerFor(savedModel) != null
-            ? savedModel
-            : (_models.isEmpty ? '' : _models.first);
+        ModelKey? resolved;
+        if (savedModel.isNotEmpty) {
+          final k = _decodeModelKey(savedModel);
+          if (k != null &&
+              _modelIndex.containsKey(_encodeModelKey(k.provider, k.id))) {
+            resolved = k;
+          } else {
+            // v1 兼容：裸 id 匹配第一个命中的模型
+            for (final key in _modelIndex.keys) {
+              final d = _decodeModelKey(key);
+              if (d != null && d.id == savedModel) {
+                resolved = d;
+                break;
+              }
+            }
+            // 迁移写回（仅当旧值是裸 id 形式）
+            if (resolved != null &&
+                savedModel != _encodeModelKey(resolved.provider, resolved.id)) {
+              _store?.saveModelName(
+                _encodeModelKey(resolved.provider, resolved.id),
+              );
+            }
+          }
+        }
+        if (resolved != null) {
+          _currentProviderName = resolved.provider;
+          _modelName = resolved.id;
+        } else if (_modelKeys.isNotEmpty) {
+          final f = _decodeModelKey(_modelKeys.first)!;
+          _currentProviderName = f.provider;
+          _modelName = f.id;
+        } else {
+          _currentProviderName = '';
+          _modelName = '';
+        }
         // 通用设置（粘贴/标题/渲染开关）启动时恢复
         _general = s.loadGeneralSettings();
       });
@@ -3269,9 +3353,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 modelLabel: _modelLabel,
                 visibleModels: _visibleModels,
                 modelDisplay: _modelDisplayText,
-                onModelSelected: (id) {
-                  setState(() => _modelName = id);
-                  _store?.saveModelName(id);
+                onModelSelected: (key) {
+                  final k = _decodeModelKey(key);
+                  if (k == null) return;
+                  setState(() {
+                    _currentProviderName = k.provider;
+                    _modelName = k.id;
+                  });
+                  _store?.saveModelName(_encodeModelKey(k.provider, k.id));
                 },
                 onNewConversation: _newConversation,
                 onOpenProvidersSettings: () =>
