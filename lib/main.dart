@@ -91,6 +91,11 @@ void main() {
   SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
   // 预热模糊 shader，避免首帧卡顿
   Inspire.warmUp();
+  // 全局解码图片缓存限额（默认 1000 张/100MB 过大）：
+  // 100 张 / 48MB——超出按 LRU 自动淘汰
+  PaintingBinding.instance.imageCache
+    ..maximumSize = 100
+    ..maximumSizeBytes = 48 << 20;
   runApp(const LlmUiApp());
 }
 
@@ -346,7 +351,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
+class _HomePageState extends State<HomePage>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   /// 死区高度：列表第一项（背景色块），随内容滚动
   static const double _deadZoneHeight = 45;
 
@@ -382,8 +388,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   String _currentProviderName = '';
 
   /// 当前模型复合键（provider + id 的编码串；空 = 未选模型）
-  String get _currentKey =>
-      _modelName.isEmpty ? '' : _encodeModelKey(_currentProviderName, _modelName);
+  String get _currentKey => _modelName.isEmpty
+      ? ''
+      : _encodeModelKey(_currentProviderName, _modelName);
 
   /// 模型提供方列表（设置页配置，持久化；默认预置无模型）
   List<ModelProvider> _providers = [];
@@ -410,13 +417,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final p = _modelIndex[key];
     if (p != null) {
       for (final m in p.models) {
-        if (m.id == k.id && m.displayName != null && m.displayName!.isNotEmpty) {
+        if (m.id == k.id &&
+            m.displayName != null &&
+            m.displayName!.isNotEmpty) {
           return m.displayName!;
         }
       }
     }
     final dup =
-        _modelIndex.keys.where((x) => _decodeModelKey(x)?.id == k.id).length > 1;
+        _modelIndex.keys.where((x) => _decodeModelKey(x)?.id == k.id).length >
+        1;
     return dup ? '${k.provider}/${k.id}' : k.id;
   }
 
@@ -2566,7 +2576,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               _providers = List.of(providers);
               _rebuildModelIndex();
               // 当前模型被移除（提供方删除/模型删除）→ 回退到第一个模型
-              if (_modelName.isNotEmpty && !_modelIndex.containsKey(_currentKey)) {
+              if (_modelName.isNotEmpty &&
+                  !_modelIndex.containsKey(_currentKey)) {
                 if (_modelKeys.isEmpty) {
                   _currentProviderName = '';
                   _modelName = '';
@@ -3071,6 +3082,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    // 内存压力响应：系统内存紧张时清各级缓存
+    WidgetsBinding.instance.addObserver(this);
     // 输入栏顶边高度变化（多行增高/收起）反映在列表 padding → 布局 →
     // ChatScrollPosition.correctForNewDimensions 统一处理（贴底/上翻补偿），
     // 无需额外监听器
@@ -3208,8 +3221,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final store = _store;
     if (store == null) return;
     setState(() {
-      _conversations = store.loadAll().where((c) => !c.archived).toList();
-      _archivedConversations = store.loadAll().where((c) => c.archived).toList()
+      final all = store.loadAll();
+      _conversations = all.where((c) => !c.archived).toList();
+      _archivedConversations = all.where((c) => c.archived).toList()
         ..sort(
           (a, b) => (b.archivedAt ?? b.updatedAt).compareTo(
             a.archivedAt ?? a.updatedAt,
@@ -3222,8 +3236,20 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     });
   }
 
+  /// 系统内存紧张（onTrimMemory / lowMemory）：释放三层缓存——
+  /// 解码图片、消息图片 provider、显示层规则文本；数据本体
+  /// （会话/消息）不受影响，需要时按需重建
+  @override
+  void didHaveMemoryPressure() {
+    PaintingBinding.instance.imageCache.clear();
+    _imageCache.clear();
+    _imageCacheBytes = 0;
+    _displayCache.clear();
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _streamSub?.cancel();
     _maintainTimer?.cancel();
     _chatScroll.dispose();
@@ -3233,10 +3259,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    final topPad = MediaQuery.paddingOf(context).top;
-    final bottomPad = MediaQuery.paddingOf(context).bottom;
+    // Insets 物理上限截断（小窗/悬浮窗防御）：MIUI 小窗会把
+    // viewInsets/padding 上报为异常大的残留值（如全屏键盘高度），
+    // 把列表、页眉、空状态整体推出视口——只剩不受 insets 影响的
+    // 输入栏。真实键盘不会超过窗口高 60%，状态栏不超过 8%，
+    // 手势条不超过 5%，按此截断
+    final winH = MediaQuery.sizeOf(context).height;
+    final topPad = math.min(MediaQuery.paddingOf(context).top, winH * 0.08);
+    final bottomPad = math.min(
+      MediaQuery.paddingOf(context).bottom,
+      winH * 0.05,
+    );
     // 输入栏随键盘升起（主界面不动）
-    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final keyboardInset = math.min(
+      MediaQuery.viewInsetsOf(context).bottom,
+      winH * 0.6,
+    );
     // 键盘/输入栏变化反映在列表 padding → 布局 →
     // ChatScrollPosition.correctForNewDimensions 统一处理（贴底/上翻补偿）
 
@@ -3257,6 +3295,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       child: CustomScrollView(
         controller: _chatScroll,
         center: _listCenterKey, // 锚点：消息列表顶部
+        // anchor 显式 0：锚点对齐视口顶（默认 0.5 是视口中心——
+        // 小窗/悬浮窗模式视口小，锚点前空 sliver 的布局会把内容
+        // 推到视口外导致「不显示对话内容」）
+        anchor: 0.0,
         slivers: [
           // 锚点本身（零尺寸）
           SliverPadding(key: _listCenterKey, padding: EdgeInsets.zero),
@@ -3626,7 +3668,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         alignment: Alignment.centerRight, // System 卡片靠右
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+            maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
           ),
           child: Container(
             padding: const EdgeInsets.all(10),
@@ -3743,7 +3785,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       alignment: Alignment.centerRight, // System 卡片靠右
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+          maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
         ),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -3908,7 +3950,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+            maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
           ),
           child: Column(
             crossAxisAlignment: align,
@@ -4689,13 +4731,34 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   /// 不再重复 base64 解码 + 图片解码（这是"每次加载"的根因）
   static final Map<String, MemoryImage> _imageCache = {};
 
-  /// 从 data URL 取（或创建并缓存）图片 provider
-  MemoryImage _imageProviderFor(String dataUrl) =>
-      _imageCache.putIfAbsent(dataUrl, () {
-        final comma = dataUrl.indexOf(',');
-        final b64 = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
-        return MemoryImage(base64Decode(b64));
-      });
+  /// 图片缓存字节量（约）：原始图 ≤4MB/张，10 张 ≈ 40MB 封顶
+  static int _imageCacheBytes = 0;
+
+  /// 从 data URL 取（或创建并缓存）图片 provider。
+  /// LRU 上限：10 张 / 约 40MB——超过时先访问序淘汰最旧条目
+  ///（消息里的 dataUrl 字符串常驻，provider 缓存只是解码副本，
+  /// 淘汰后再次显示会按需重建，功能无损）
+  MemoryImage _imageProviderFor(String dataUrl) {
+    final hit = _imageCache.remove(dataUrl);
+    if (hit != null) {
+      _imageCache[dataUrl] = hit; // 重新插入 = 刷新 LRU 顺序
+      return hit;
+    }
+    final comma = dataUrl.indexOf(',');
+    final b64 = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
+    final img = MemoryImage(base64Decode(b64));
+    // 淘汰：超条目数或超字节量（base64 长度 ×0.75 ≈ 原始字节）
+    while (_imageCache.length >= 10 ||
+        (_imageCacheBytes + b64.length * 3 ~/ 4 > 40 << 20 &&
+            _imageCache.isNotEmpty)) {
+      final oldestKey = _imageCache.keys.first;
+      final old = _imageCache.remove(oldestKey)!;
+      _imageCacheBytes -= old.bytes.length;
+    }
+    _imageCache[dataUrl] = img;
+    _imageCacheBytes += img.bytes.length;
+    return img;
+  }
 
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
@@ -5872,11 +5935,17 @@ class _GlassInputBarState extends State<_GlassInputBar> {
 
   @override
   Widget build(BuildContext context) {
-    final bottomPad = MediaQuery.paddingOf(context).bottom;
+    // Insets 物理上限截断（小窗/悬浮窗防御，同 HomePage）：
+    // 异常大的残留 insets 只会顶飞输入栏，按键盘真实上限截断
+    final winH = MediaQuery.sizeOf(context).height;
+    final bottomPad = math.min(
+      MediaQuery.paddingOf(context).bottom,
+      winH * 0.05,
+    );
     // 仅当输入栏自身触发输入时随键盘升起；编辑消息/提示词等其他输入场景
     // 下输入栏保持在底部（键盘由别的输入框触发，不顶起输入栏）
     final rawInset = _focusNode.hasFocus
-        ? MediaQuery.viewInsetsOf(context).bottom
+        ? math.min(MediaQuery.viewInsetsOf(context).bottom, winH * 0.6)
         : 0.0;
     // 键盘动画进行中（inset 逐帧变化）→ 零时长直接跟随，精确贴键盘；
     // 稳定后（含失焦瞬间目标归零）→ 走平滑过渡
@@ -7471,7 +7540,7 @@ class _InlineMessageEditorState extends State<_InlineMessageEditor> {
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+          maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
         ),
         child: Container(
           padding: const EdgeInsets.all(10),

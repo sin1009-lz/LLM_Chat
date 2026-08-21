@@ -113,7 +113,8 @@ extension _MarkdownViewRender on MarkdownView {
       selectable: true,
       softLineBreak: true,
       onTapLink: (text, href, title) => _openLink(context, href),
-      sizedImageBuilder: (config) => _imageAsLink(context, config.uri, config.alt),
+      sizedImageBuilder: (config) =>
+          _imageAsLink(context, config.uri, config.alt),
       builders: {
         'pre': _CodeBlockBuilder(
           textColor: textColor,
@@ -232,9 +233,9 @@ extension _MarkdownViewRender on MarkdownView {
     if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
       return;
     }
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => BrowserPage(url: href)),
-    );
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => BrowserPage(url: href)));
   }
 
   /// 图片链接：不自动加载网络图，显示为可点击链接（安全）
@@ -487,8 +488,19 @@ class _MermaidDiagram extends StatefulWidget {
 }
 
 class _MermaidDiagramState extends State<_MermaidDiagram> {
-  /// 应用级光栅化缓存（key = isDark\nsource）；超量清空防内存膨胀
+  /// 应用级光栅化缓存：字节封顶 24MB、条目封顶 12——超限按插入序
+  /// 淘汰最旧（重建只需一次 WebView 渲染，功能无损）
   static final Map<String, _MermaidRaster> _rasterCache = {};
+  static int _rasterCacheBytes = 0;
+
+  /// 缓存淘汰：保持总字节 ≤ 24MB 且条目 ≤ 12
+  static void _evictRasterCache() {
+    while (_rasterCache.isNotEmpty &&
+        (_rasterCache.length > 12 || _rasterCacheBytes > 24 << 20)) {
+      final oldest = _rasterCache.keys.first;
+      _rasterCacheBytes -= _rasterCache.remove(oldest)!.bytes.length;
+    }
+  }
 
   String get _cacheKey => '${widget.isDark ? 'd' : 'l'}\n${widget.source}';
 
@@ -531,6 +543,12 @@ class _MermaidDiagramState extends State<_MermaidDiagram> {
             '[mermaid-png] ok=${png is String} w=${data['w']} h=${data['h']} '
             'err=${data['error']} skip=${data['skip']}',
           );
+          // 超大 PNG 直接丢弃（双保险：超大 base64 传输会打爆
+          // WebView 堆导致 OOM 闪退），保留 WebView 展示
+          if (png is String && png.length > 8 * 1024 * 1024) {
+            debugPrint('[mermaid-png] drop oversized png');
+            return;
+          }
           if (png is String && data['w'] is num && data['h'] is num) {
             final b64 = png.replaceFirst(
               RegExp(r'^data:image/png;base64,'),
@@ -541,9 +559,18 @@ class _MermaidDiagramState extends State<_MermaidDiagram> {
               w: (data['w'] as num).toDouble(),
               h: (data['h'] as num).toDouble(),
             );
-            if (_rasterCache.length > 30) _rasterCache.clear();
+            _evictRasterCache();
             _rasterCache[_cacheKey] = raster;
-            if (mounted) setState(() => _raster = raster);
+            _rasterCacheBytes += raster.bytes.length;
+            _evictRasterCache();
+            if (mounted) {
+              setState(() {
+                _raster = raster;
+                // 光栅化成功：释放 WebView（列表不再携带 platform view，
+                // 控制器与渲染进程资源随之回收）
+                _controller = null;
+              });
+            }
           }
           // skip/error：保留 WebView 展示（现有渲染已可见）
         },

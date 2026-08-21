@@ -4,10 +4,12 @@
     <!-- 内置工具：获取地理位置（模型可查询设备位置） -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <!-- largeHeap：WebView 光栅化/base64 传输峰值高，默认 256MB 堆易 OOM -->
     <application
         android:label="LLM_Chat"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:largeHeap="true"
         android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"

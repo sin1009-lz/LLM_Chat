@@ -75,22 +75,31 @@
         // 恢复内联显示缩放（CSS max-width 接管）
         sv.style.maxWidth = '';
         if (!rasterize) return;
-        console.log('RASTER start w=' + w + ' h=' + h);
+        // 光栅化内存上限：canvas 位图 w*h*4 字节，toDataURL 的 PNG 字符串
+        // 再膨胀 1.33 倍，JSON 包装再翻倍——最终 canvas 像素必须封顶
+        // （此前 2048×2048 在 2x 缩放后达 67MB 位图 + 119MB 字符串，
+        // 直接把 WebView 堆打爆闪退）。自适应缩放：大图降倍率，
+        // 过大直接跳过光栅化（保留 WebView 展示）
+        const MAX_FINAL_PIXELS = 1600000; // 最终 canvas ≤ 1.6M 像素
+        var s = Math.min(2, Math.sqrt(MAX_FINAL_PIXELS / (w * h)));
+        if (!(s > 0.25)) {
+          console.log('RASTER skip: too large ' + w + 'x' + h);
+          return post('mermaidPng', { id: id, skip: true });
+        }
+        console.log('RASTER start w=' + w + ' h=' + h + ' scale=' + s.toFixed(2));
         const xml = new XMLSerializer().serializeToString(sv);
         const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
         const img = new Image();
         img.onload = () => {
           try {
-            const s = 2;
             const c = document.createElement('canvas');
-            c.width = Math.min(8192, Math.ceil(w * s));
-            c.height = Math.min(8192, Math.ceil(h * s));
+            c.width = Math.ceil(w * s);
+            c.height = Math.ceil(h * s);
             const ctx = c.getContext('2d');
-            ctx.setTransform(c.width / w, 0, 0, c.height / h, 0, 0);
-            ctx.drawImage(img, 0, 0);
+            ctx.drawImage(img, 0, 0, c.width, c.height);
             const png = c.toDataURL('image/png');
             console.log('RASTER png len=' + png.length);
-            if (png.length > 6000000) return post('mermaidPng', { id: id, skip: true });
+            if (png.length > 4000000) return post('mermaidPng', { id: id, skip: true });
             post('mermaidPng', { id: id, png: png, w: w, h: h });
           } catch (e) {
             console.error('RASTER canvas: ' + (e && e.message || e));
