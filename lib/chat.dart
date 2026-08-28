@@ -1,8 +1,11 @@
+import 'dart:io';
+
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show compute;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'general_settings.dart';
 
@@ -60,8 +63,6 @@ class ProviderModel {
     contextWindow: j['contextWindow'] as int?,
   );
 }
-
-
 
 /// 模型提供方（DeepSeek / Kimi / Qwen / GLM 或自定义）：
 /// baseUrl + apiKey + 模型列表。模型需手动从 API 获取（默认无模型）
@@ -196,7 +197,11 @@ String applyModelRules(String text, List<TextReplaceRule> rules) {
 
 /// 图片消息部件（多模态）：图片以 base64 data URL（原图）随消息持久化
 class ImagePart {
-  ImagePart({required this.name, required this.mimeType, required this.dataUrl});
+  ImagePart({
+    required this.name,
+    required this.mimeType,
+    required this.dataUrl,
+  });
 
   final String name;
   final String mimeType;
@@ -264,8 +269,8 @@ class McpServer {
     token: j['token'] as String? ?? '',
     enabled: j['enabled'] as bool? ?? true,
     transport: j['transport'] as String? ?? 'http',
-    command: (j['command'] as List?)?.map((c) => c.toString()).toList() ??
-        const [],
+    command:
+        (j['command'] as List?)?.map((c) => c.toString()).toList() ?? const [],
   );
 }
 
@@ -325,9 +330,7 @@ McpServer? _mcpServerFromMap(
   if (token.isEmpty) {
     final headers = v['headers'];
     if (headers is Map) {
-      final auth = (headers['Authorization'] ??
-              headers['authorization'] ??
-              '')
+      final auth = (headers['Authorization'] ?? headers['authorization'] ?? '')
           .toString();
       if (auth.startsWith('Bearer ')) token = auth.substring(7).trim();
     }
@@ -335,14 +338,12 @@ McpServer? _mcpServerFromMap(
   // stdio 原始命令（command + args，仅展示）
   final command = <String>[
     if (v['command'] != null) v['command'].toString(),
-    if (v['args'] is List)
-      ...(v['args'] as List).map((a) => a.toString()),
+    if (v['args'] is List) ...(v['args'] as List).map((a) => a.toString()),
   ];
   // 清理尾部斜杠（协议层拼接用）
   final cleanUrl = url.replaceAll(RegExp(r'/$'), '');
   return McpServer(
-    id:
-        '${DateTime.now().microsecondsSinceEpoch}_$seq',
+    id: '${DateTime.now().microsecondsSinceEpoch}_$seq',
     name: name.isEmpty
         ? (cleanUrl.isEmpty ? (fallbackName ?? '') : cleanUrl)
         : name,
@@ -600,6 +601,7 @@ class Conversation {
     this.locked = false,
     this.archivedAt,
     this.builtinToolsEnabled,
+    this.loaded = true,
   });
 
   final String id;
@@ -617,6 +619,10 @@ class Conversation {
 
   /// 是否已归档（从主历史列表移除，可在设置页恢复/永久删除）
   bool archived;
+
+  /// 瞬态标记（不序列化）：true = 完整对象（消息在内存）；
+  /// false = 元数据壳（列表用，消息未加载，save 时自动从文件合并）
+  bool loaded;
 
   /// 锁定（阻止自动归档；手动归档/删除不受限）
   bool locked;
@@ -650,65 +656,185 @@ class Conversation {
     updatedAt: DateTime.parse(j['updatedAt'] as String),
     modelId: j['modelId'] as String?,
     systemPrompt: j['systemPrompt'] as String?,
-    mcpServerIds: (j['mcpServerIds'] as List?)?.map((s) => s.toString()).toList(),
+    mcpServerIds: (j['mcpServerIds'] as List?)
+        ?.map((s) => s.toString())
+        .toList(),
     archived: j['archived'] as bool? ?? false,
     locked: j['locked'] as bool? ?? false,
     archivedAt: j['archivedAt'] != null
         ? DateTime.tryParse(j['archivedAt'] as String)
         : null,
     builtinToolsEnabled: j['builtinToolsEnabled'] as bool?,
+    loaded: true,
   );
 }
 
-/// 持久化封装（shared_preferences，key 形如 conv_id + 索引列表 conv_ids）
+/// 持久化封装：会话正文存独立文件（`convs/<id>.json`），SharedPreferences
+/// 只存轻量元数据索引（conv_index）+ 各项设置——此前全部塞 prefs 单一
+/// XML，会话涨到几十 MB 后冷启动要整体解析（对话/模型列表"加载半天"
+/// 的根源），且每次保存全量重写整个文件
 class ChatStore {
-  static const _idsKey = 'conv_ids';
+  static const _idsKey = 'conv_ids'; // 旧版索引（迁移检测用）
+  static const _indexKey = 'conv_index';
   final SharedPreferences _prefs;
+  late final Directory _dir;
 
-  ChatStore(this._prefs);
+  ChatStore(this._prefs, this._dir);
 
   /// 进程级缓存：多次 create 复用同一实例（SharedPreferences 是单例，
   /// 避免重复初始化；各入口拿到的都是同一数据源）
   static ChatStore? _cached;
 
-  static Future<ChatStore> create() async =>
-      _cached ??= ChatStore(await SharedPreferences.getInstance());
+  static Future<ChatStore> create() async {
+    if (_cached != null) return _cached!;
+    final prefs = await SharedPreferences.getInstance();
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory('${base.path}/convs');
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    final s = ChatStore(prefs, dir);
+    await s._migrateFromPrefs();
+    return _cached = s;
+  }
 
-  /// 读取全部会话（按索引顺序，最新在前）
-  List<Conversation> loadAll() {
-    final ids = _prefs.getStringList(_idsKey) ?? <String>[];
-    final list = <Conversation>[];
-    for (final id in ids) {
-      final raw = _prefs.getString('conv_$id');
-      if (raw != null) {
-        try {
-          list.add(
-            Conversation.fromJson(jsonDecode(raw) as Map<String, dynamic>),
-          );
-        } catch (_) {
-          // 损坏数据跳过
-        }
-      }
+  /// 一次性迁移：旧版 prefs 里的 `conv_<id>` 正文搬到文件，索引换成
+  /// 轻量元数据（搬家后 prefs 恢复小文件，冷启动即恢复毫秒级）
+  Future<void> _migrateFromPrefs() async {
+    final legacyIds = _prefs.getStringList(_idsKey);
+    final hasIndex = _prefs.getString(_indexKey) != null;
+    if (legacyIds == null || legacyIds.isEmpty) {
+      if (!hasIndex) await _prefs.setString(_indexKey, '[]');
+      return;
     }
-    return list;
+    final index = <Map<String, dynamic>>[];
+    for (final id in legacyIds) {
+      final raw = _prefs.getString('conv_$id');
+      if (raw == null) continue;
+      try {
+        final j = jsonDecode(raw) as Map<String, dynamic>;
+        File('${_dir.path}/$id.json').writeAsStringSync(raw);
+        index.add(_indexEntryFromJson(j, id));
+      } catch (_) {
+        // 损坏数据跳过
+      }
+      await _prefs.remove('conv_$id');
+    }
+    await _prefs.setString(_indexKey, jsonEncode(index));
+    await _prefs.remove(_idsKey);
+  }
+
+  Map<String, dynamic> _indexEntryFromJson(Map<String, dynamic> j, String id) =>
+      {
+        'id': id,
+        'title': j['title'] ?? '',
+        'updatedAt': j['updatedAt'] ?? '',
+        'modelId': j['modelId'],
+        'archived': j['archived'] ?? false,
+        'locked': j['locked'] ?? false,
+        'archivedAt': j['archivedAt'],
+      };
+
+  Map<String, dynamic> _indexEntryOf(Conversation c) => {
+    'id': c.id,
+    'title': c.title,
+    'updatedAt': c.updatedAt.toIso8601String(),
+    'modelId': c.modelId,
+    'archived': c.archived,
+    'locked': c.locked,
+    'archivedAt': c.archivedAt?.toIso8601String(),
+  };
+
+  Conversation _shellFromEntry(Map<String, dynamic> e) => Conversation(
+    id: e['id'] as String,
+    title: (e['title'] as String?) ?? '',
+    messages: [],
+    updatedAt:
+        DateTime.tryParse((e['updatedAt'] as String?) ?? '') ?? DateTime.now(),
+    modelId: e['modelId'] as String?,
+    archived: (e['archived'] as bool?) ?? false,
+    locked: (e['locked'] as bool?) ?? false,
+    archivedAt: e['archivedAt'] != null
+        ? DateTime.tryParse(e['archivedAt'] as String)
+        : null,
+    loaded: false,
+  );
+
+  List<Map<String, dynamic>> _readIndex() {
+    final raw = _prefs.getString(_indexKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      return (jsonDecode(raw) as List)
+          .whereType<Map<String, dynamic>>()
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _writeIndex(List<Map<String, dynamic>> index) =>
+      _prefs.setString(_indexKey, jsonEncode(index));
+
+  File _file(String id) => File('${_dir.path}/$id.json');
+
+  /// 读取全部会话（按索引顺序，最新在前）——只返回元数据壳，
+  /// 消息正文按需加载（loadConversation）。列表场景（抽屉/归档）
+  /// 只需要标题时间，冷启动不再全量解析正文
+  List<Conversation> loadAll() => _readIndex().map(_shellFromEntry).toList();
+
+  /// 加载单个会话完整正文（打开会话时调用）；文件缺失/损坏返回 null
+  Conversation? loadConversation(String id) {
+    try {
+      final raw = _file(id).readAsStringSync();
+      return Conversation.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> save(Conversation c) async {
-    final ids = List<String>.from(_prefs.getStringList(_idsKey) ?? <String>[]);
-    if (!ids.contains(c.id)) ids.insert(0, c.id); // 新的放最前
+    // 壳对象（元数据被修改，如自动归档/锁定/恢复）：从文件合并正文，
+    // 防止把空消息列表写回文件丢数据
+    if (!c.loaded) {
+      final existing = loadConversation(c.id);
+      if (existing != null) {
+        existing
+          ..title = c.title
+          ..updatedAt = c.updatedAt
+          ..archived = c.archived
+          ..archivedAt = c.archivedAt
+          ..locked = c.locked
+          ..modelId = c.modelId;
+        c = existing;
+      } else {
+        c.loaded = true; // 文件不存在（新会话首次保存），按完整对象落盘
+      }
+    }
     // JSON 编码放后台 isolate：分支树大会话的序列化不在 UI 线程执行
-    //（分支切换卡顿来源），shared_preferences 写入本身已是异步
+    //（分支切换卡顿来源）
     final json = await compute(_encodeConversationJson, c);
-    await _prefs.setString('conv_${c.id}', json);
-    await _prefs.setStringList(_idsKey, ids);
+    _file(c.id).writeAsStringSync(json);
+    // 更新索引（保持顺序：已存在原位更新，新的插最前）
+    final index = _readIndex();
+    final entry = _indexEntryOf(c);
+    final i = index.indexWhere((e) => e['id'] == c.id);
+    if (i >= 0) {
+      index[i] = entry;
+    } else {
+      index.insert(0, entry);
+    }
+    await _writeIndex(index);
   }
 
   Future<void> rename(String id, String title) async {
-    final raw = _prefs.getString('conv_$id');
-    if (raw == null) return;
-    final c = Conversation.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    final c = loadConversation(id);
+    if (c == null) return;
     c.title = title;
-    await _prefs.setString('conv_$id', jsonEncode(c.toJson()));
+    _file(id).writeAsStringSync(jsonEncode(c.toJson()));
+    final index = _readIndex();
+    final i = index.indexWhere((e) => e['id'] == id);
+    if (i >= 0) {
+      index[i] = _indexEntryOf(c);
+      await _writeIndex(index);
+    }
   }
 
   /// 提示词（system prompt）：读取/保存（空串视为无）
@@ -729,8 +855,7 @@ class ChatStore {
   /// 最后使用的对话模型：固化到存档，软件重启不重置
   String loadModelName() => _prefs.getString('model_name') ?? '';
 
-  Future<void> saveModelName(String id) =>
-      _prefs.setString('model_name', id);
+  Future<void> saveModelName(String id) => _prefs.setString('model_name', id);
 
   /// 通用设置（粘贴/标题策略/AI标题/渲染开关）：单条 JSON String
   GeneralSettings loadGeneralSettings() {
@@ -779,9 +904,9 @@ class ChatStore {
   }
 
   Future<void> saveMcpServers(List<McpServer> list) => _prefs.setStringList(
-        'mcp_servers',
-        list.map((s) => jsonEncode(s.toJson())).toList(),
-      );
+    'mcp_servers',
+    list.map((s) => jsonEncode(s.toJson())).toList(),
+  );
 
   /// 模型提供方列表：读取（无存档则返回预置——预置无模型，需手动获取）
   List<ModelProvider> loadProviders() {
@@ -802,37 +927,36 @@ class ChatStore {
     final list = <ModelProvider>[];
     for (final s in raw) {
       try {
-        list.add(
-          ModelProvider.fromJson(jsonDecode(s) as Map<String, dynamic>),
-        );
+        list.add(ModelProvider.fromJson(jsonDecode(s) as Map<String, dynamic>));
       } catch (_) {
         // 损坏数据跳过
       }
     }
     return list.isEmpty
         ? kPresetProviders
-              .map((p) => ModelProvider(
-                    name: p.name,
-                    baseUrl: p.baseUrl,
-                    apiKey: p.apiKey,
-                    models: [],
-                    isPreset: true,
-                  ))
+              .map(
+                (p) => ModelProvider(
+                  name: p.name,
+                  baseUrl: p.baseUrl,
+                  apiKey: p.apiKey,
+                  models: [],
+                  isPreset: true,
+                ),
+              )
               .toList()
         : list;
   }
 
-  Future<void> saveProviders(List<ModelProvider> list) =>
-      _prefs.setStringList(
-        'model_providers',
-        list.map((p) => jsonEncode(p.toJson())).toList(),
-      );
+  Future<void> saveProviders(List<ModelProvider> list) => _prefs.setStringList(
+    'model_providers',
+    list.map((p) => jsonEncode(p.toJson())).toList(),
+  );
 
   Future<void> delete(String id) async {
-    final ids = List<String>.from(_prefs.getStringList(_idsKey) ?? <String>[]);
-    ids.remove(id);
-    await _prefs.remove('conv_$id');
-    await _prefs.setStringList(_idsKey, ids);
+    final f = _file(id);
+    if (f.existsSync()) f.deleteSync();
+    final index = _readIndex()..removeWhere((e) => e['id'] == id);
+    await _writeIndex(index);
   }
 }
 
@@ -894,37 +1018,43 @@ class LlmService {
   final String _baseUrl;
   final String _apiKey;
 
-  /// 思考深度请求参数包：同时覆盖三类控制，各服务取自己认识的字段、
-  /// 忽略其余（OpenAI 兼容生态通行做法）——
+  /// 思考深度四档：none / low / high / max（主控字段 reasoning.effort，
+  /// 新版 OpenAI/DeepSeek 生态通行格式），并附带兼容字段覆盖其余
+  /// 控制体系，各服务取自己认识的字段、忽略其余——
   /// · 开关型：chat_template_kwargs.enable_thinking（llama.cpp/Qwen3）、
-  ///   chat_template_kwargs.thinking（vLLM）、顶层 thinking.type（DeepSeek，
-  ///   llama.cpp 也会映射为 enable_thinking）
-  /// · 力度型：reasoning_effort 三档（关闭/低/高；用 low/high 而不用
-  ///   medium——DeepSeek 官方只认 low/high/max，medium 有兼容风险）
-  /// · 预算型：thinking.budget_tokens（Anthropic）、thinkingConfig.thinkingBudget
-  ///   （Gemini）、reasoning_budget（llama.cpp）
-  /// 深度 0 = 关闭（不带 effort 与预算，防止「thinking disabled + effort」400）；
-  /// 深度 1 = 开启 + effort low + 中等预算；深度 2 = 最高 + effort high + 高预算
-  Map<String, dynamic> _thinkingParams(int depth) => {
-    'chat_template_kwargs': {
-      'enable_thinking': depth > 0,
-      'thinking': depth > 0,
-      if (depth > 0) 'reasoning_effort': depth >= 2 ? 'high' : 'low',
-    },
-    'thinking': {
-      'type': depth > 0 ? 'enabled' : 'disabled',
-      if (depth > 0) 'budget_tokens': depth >= 2 ? 16384 : 4096,
-    },
-    if (depth > 0) 'reasoning_effort': depth >= 2 ? 'high' : 'low',
-    if (depth > 0) 'reasoning_budget': depth >= 2 ? 16384 : 4096,
-    if (depth > 0)
-      'thinkingConfig': {
-        'thinkingBudget': depth >= 2 ? 16384 : 4096,
+  ///   顶层 thinking.type（DeepSeek）
+  /// · 力度型：reasoning.effort（主）/ reasoning_effort（旧顶层）
+  /// · 预算型：thinking.budget_tokens（Anthropic）、thinkingConfig.
+  ///   thinkingBudget（Gemini）、reasoning_budget（llama.cpp）
+  /// 深度 0 = none（关闭思考：不带 effort 与预算，防止
+  /// 「thinking disabled + effort」400）；1 = low；2 = high；3 = max
+  /// （max 档预算对齐 DeepSeek max 的量级）
+  static const _efforts = ['none', 'low', 'high', 'max'];
+  static const _budgets = [0, 4096, 16384, 32768];
+
+  Map<String, dynamic> _thinkingParams(int depth) {
+    final d = depth.clamp(0, 3);
+    final on = d > 0;
+    final effort = _efforts[d];
+    final budget = _budgets[d];
+    return {
+      // 主控：四档 effort（none 显式发送）
+      'reasoning': {'effort': effort},
+      // 兼容：开关型（Anthropic thinking.type + budget_tokens）
+      'chat_template_kwargs': {'enable_thinking': on, 'thinking': on},
+      'thinking': {
+        'type': on ? 'enabled' : 'disabled',
+        if (on) 'budget_tokens': budget,
       },
-  };
+      // 兼容：旧顶层 effort / 预算型（关闭档不带，防 400）
+      if (on) 'reasoning_effort': effort,
+      if (on) 'reasoning_budget': budget,
+      if (on) 'thinkingConfig': {'thinkingBudget': budget},
+    };
+  }
 
   /// 发起对话，返回增量流（包含思考段与答案段）。onError 由调用方 listen(onError) 处理。
-  /// [model] 选择模型；[thinkingDepth] 思考深度（0 关闭 / 1 开启 / 2 最高，
+  /// [model] 选择模型；[thinkingDepth] 思考深度（0 none / 1 low / 2 high / 3 max，
   /// 请求参数见 [_thinkingParams]）；
   /// [systemPrompt] 非空时作为 system 消息插入最前；
   /// [tools] 非空时随请求附带（OpenAI function calling 格式，供 MCP 工具调用用）。
@@ -951,7 +1081,9 @@ class LlmService {
                 (m.fileParts?.isNotEmpty ?? false) ||
                 (m.thinking?.isNotEmpty ?? false),
           )
-          .map((m) => {'role': _roleName(m.role), 'content': _contentPayload(m)}),
+          .map(
+            (m) => {'role': _roleName(m.role), 'content': _contentPayload(m)},
+          ),
     ];
     final req = http.Request('POST', url)
       ..headers['Content-Type'] = 'application/json'
@@ -1034,17 +1166,14 @@ class LlmService {
   /// 端点不存在/超时/解析失败返回 null（调用方降级为估算）
   Future<int?> tokenize(String text, {required String model}) async {
     if (text.trim().isEmpty) return 0;
-    final url = Uri.parse(
-      '${_baseUrl.replaceAll(RegExp(r'/$'), '')}/tokenize',
-    );
+    final url = Uri.parse('${_baseUrl.replaceAll(RegExp(r'/$'), '')}/tokenize');
     try {
       final res = await http
           .post(
             url,
             headers: {
               'Content-Type': 'application/json',
-              if (_apiKey.trim().isNotEmpty)
-                'Authorization': 'Bearer $_apiKey',
+              if (_apiKey.trim().isNotEmpty) 'Authorization': 'Bearer $_apiKey',
             },
             body: jsonEncode({
               'model': model,
@@ -1183,8 +1312,8 @@ class LlmService {
   }) async {
     final prompt = (customPrompt != null && customPrompt.trim().isNotEmpty)
         ? customPrompt
-            .replaceAll('{{USER}}', userContent)
-            .replaceAll('{{ASSISTANT}}', assistantContent)
+              .replaceAll('{{USER}}', userContent)
+              .replaceAll('{{ASSISTANT}}', assistantContent)
         : _buildTitlePrompt(userContent, assistantContent);
     final url = Uri.parse(
       '${_baseUrl.replaceAll(RegExp(r'/$'), '')}/chat/completions',
@@ -1195,8 +1324,7 @@ class LlmService {
             url,
             headers: {
               'Content-Type': 'application/json',
-              if (_apiKey.trim().isNotEmpty)
-                'Authorization': 'Bearer $_apiKey',
+              if (_apiKey.trim().isNotEmpty) 'Authorization': 'Bearer $_apiKey',
             },
             body: jsonEncode({
               // 标题生成用当前模型（短输出，不思考）。

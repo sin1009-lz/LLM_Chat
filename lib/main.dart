@@ -378,7 +378,7 @@ class _HomePageState extends State<HomePage>
   /// 滑动角度阈值：与水平线夹角超过 30°（tan30°≈0.577）不触发抽屉
   static const double _dragAngleThreshold = 0.577;
 
-  /// 思考深度状态：0 关闭 / 1 开启 / 2 最高
+  /// 思考深度状态（四档）：0 none / 1 low / 2 high / 3 max
   int _thinkingDepth = 0;
 
   /// 页眉模型选择：当前模型名（裸 id，来自设置页提供方，默认无）
@@ -1431,10 +1431,13 @@ class _HomePageState extends State<HomePage>
     // 模型名：跟随页眉下拉选择，直接发给服务器（测试服务为局域网模型）
     // 思考深度不再切换模型名，仅作为 UI 偏好——模型返回 reasoning_content 时显示思考块
     final model = _modelName;
-    // system 提示词 = 会话级提示词原样发送。
-    // 思考深度不注入任何提示词，只通过请求参数控制
-    // （chat_template_kwargs / thinking 对象 / reasoning_effort）
-    final finalPrompt = (conv.systemPrompt ?? '').trim();
+    // system 提示词：会话级优先；未设置时用通用设置里的默认提示词
+    //（默认提示词也为空 = 不发送）。思考深度不注入任何提示词，
+    // 只通过请求参数控制（chat_template_kwargs / thinking / effort）
+    final convPrompt = (conv.systemPrompt ?? '').trim();
+    final finalPrompt = convPrompt.isNotEmpty
+        ? convPrompt
+        : _general.defaultSystemPrompt.trim();
     // 按当前模型构建服务（提供方配置）；无模型/无地址 → 提示
     final llm = _buildLlm();
     if (llm == null) {
@@ -2669,7 +2672,11 @@ class _HomePageState extends State<HomePage>
 
   /// 选择图片（系统相册多选），完成后关闭加号面板
   Future<void> _pickImages() async {
-    final files = await ImagePicker().pickMultiImage();
+    final files = await ImagePicker().pickMultiImage(
+      maxWidth: _imgMaxSide,
+      maxHeight: _imgMaxSide,
+      imageQuality: _imgQuality,
+    );
     if (!mounted) return;
     if (files.isNotEmpty) {
       setState(() {
@@ -2677,6 +2684,31 @@ class _HomePageState extends State<HomePage>
           files.map(
             (f) => _Attachment(isImage: true, name: f.name, path: f.path),
           ),
+        );
+      });
+    }
+    Navigator.of(context).pop(); // 关闭加号面板
+  }
+
+  /// 图片规范化参数：限制最长边 2048 + 质量 85——image_picker 会
+  /// 重新编码并把 EXIF 旋转烘焙进像素（模型端不解 EXIF，原图直传
+  /// 竖拍会横躺）；相机/图库统一走这套，拍的照和选的图完全一致
+  static const _imgMaxSide = 2048.0;
+  static const _imgQuality = 85;
+
+  /// 拍照（相机）：拍一张作为图片附件（与图片入口同链路同规格）
+  Future<void> _takePhoto() async {
+    final shot = await ImagePicker().pickImage(
+      source: ImageSource.camera,
+      maxWidth: _imgMaxSide,
+      maxHeight: _imgMaxSide,
+      imageQuality: _imgQuality,
+    );
+    if (!mounted) return;
+    if (shot != null) {
+      setState(() {
+        _attachments.add(
+          _Attachment(isImage: true, name: shot.name, path: shot.path),
         );
       });
     }
@@ -3103,9 +3135,11 @@ class _HomePageState extends State<HomePage>
       if (!mounted) return;
       setState(() {
         _store = s;
-        _conversations = s.loadAll().where((c) => !c.archived).toList();
+        // 索引壳：毫秒级（此前 loadAll×2 全量解析所有正文两遍）
+        final allConvs = s.loadAll();
+        _conversations = allConvs.where((c) => !c.archived).toList();
         // 归档会话列表（设置页归档管理直接用，零延迟进入）
-        _archivedConversations = s.loadAll().where((c) => c.archived).toList()
+        _archivedConversations = allConvs.where((c) => c.archived).toList()
           ..sort(
             (a, b) => (b.archivedAt ?? b.updatedAt).compareTo(
               a.archivedAt ?? a.updatedAt,
@@ -3213,6 +3247,20 @@ class _HomePageState extends State<HomePage>
           _currentId = null;
         }
       });
+    }
+  }
+
+  /// 按需加载会话完整正文：打开会话时把列表中的元数据壳替换为
+  /// 完整对象（文件读取 + 解析一次；已在内存则跳过）
+  void _materialize(Conversation shell) {
+    if (shell.loaded) return;
+    final store = _store;
+    if (store == null) return;
+    final full = store.loadConversation(shell.id);
+    if (full == null) return;
+    final i = _conversations.indexWhere((c) => c.id == shell.id);
+    if (i >= 0 && mounted) {
+      setState(() => _conversations[i] = full);
     }
   }
 
@@ -3436,6 +3484,7 @@ class _HomePageState extends State<HomePage>
           right: 0,
           child: _GlassInputBar(
             onAddImage: _pickImages,
+            onTakePhoto: _takePhoto,
             onAddFile: _pickFiles,
             containerTopNotifier: _inputBarTop,
             isResponding: _isResponding,
@@ -4459,6 +4508,14 @@ class _HomePageState extends State<HomePage>
         ..toolCalls = t.anchor.toolCalls == null
             ? null
             : [...t.anchor.toolCalls!]
+        // 恢复该分支的图片/文件附件（用户消息分支各自携带自己的
+        // 附件版本——漏掉这里会被其他分支的附件顶替）
+        ..imageParts = t.anchor.imageParts == null
+            ? null
+            : [...t.anchor.imageParts!]
+        ..fileParts = t.anchor.fileParts == null
+            ? null
+            : [...t.anchor.fileParts!]
         ..viewPos = target;
       // 换入目标分支的后续链
       conv.messages.removeRange(index + 1, conv.messages.length);
@@ -4890,7 +4947,7 @@ class _HomePageState extends State<HomePage>
 
   /// 抽屉页面：并排按钮（思考深度 / 提示词模板）+ 历史对话滚动栏
   Widget _buildDrawer({required double topPad}) {
-    const depthLabels = ['关闭', '开启', '最高'];
+    const depthLabels = ['关闭', '低', '高', '最高'];
     return Container(
       // 抽屉页面：亮色浅灰 / 暗色深灰
       color: Theme.of(context).brightness == Brightness.dark
@@ -4953,7 +5010,7 @@ class _HomePageState extends State<HomePage>
                           value: depthLabels[_thinkingDepth],
                           onTap: () {
                             setState(
-                              () => _thinkingDepth = (_thinkingDepth + 1) % 3,
+                              () => _thinkingDepth = (_thinkingDepth + 1) % 4,
                             );
                             // 固化到存档：重启后保持
                             _store?.saveThinkingDepth(_thinkingDepth);
@@ -5220,6 +5277,9 @@ class _HomePageState extends State<HomePage>
                                             _currentId = c.id;
                                             _historyLongPressed = null;
                                           });
+                                          // 按需加载完整正文（列表里是
+                                          // 元数据壳，冷启动不解析消息）
+                                          _materialize(c);
                                           _drawerController.animateTo(
                                             0,
                                             curve: Curves.easeOutQuart,
@@ -5735,6 +5795,7 @@ class _AttachmentBar extends StatelessWidget {
 class _GlassInputBar extends StatefulWidget {
   const _GlassInputBar({
     required this.onAddImage,
+    required this.onTakePhoto,
     required this.onAddFile,
     required this.containerTopNotifier,
     required this.onSend,
@@ -5760,6 +5821,9 @@ class _GlassInputBar extends StatefulWidget {
 
   /// 加号面板：选择图片 / 文件（由 HomePage 统一处理附件）
   final VoidCallback onAddImage;
+
+  /// 加号面板：拍照（相机）
+  final VoidCallback onTakePhoto;
   final VoidCallback onAddFile;
 
   /// 上报输入栏容器顶边位置（附件条绑定其上方）
@@ -5804,7 +5868,7 @@ class _GlassInputBar extends StatefulWidget {
   /// 粘贴阈值字符数
   final int pasteThreshold;
 
-  /// 思考深度（0 关闭 / 1 开启 / 2 最高；与抽屉栏同步）
+  /// 思考深度（0 none / 1 low / 2 high / 3 max；与抽屉栏同步）
   final int thinkingDepth;
 
   /// 思考深度变更回调（主页面 setState + 持久化）
@@ -6137,7 +6201,7 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                     ),
                     const Spacer(),
                     Text(
-                      const ['关闭', '开启', '最高'][_sheetDepth],
+                      const ['关闭', '低', '高', '最高'][_sheetDepth],
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
@@ -6169,8 +6233,8 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                   child: Slider(
                     value: _sheetDepth.toDouble(),
                     min: 0,
-                    max: 2,
-                    divisions: 2,
+                    max: 3,
+                    divisions: 3,
                     // 拖动中：本地状态驱动滑条位置 + 回调主页面（抽屉同步）。
                     // 模型不支持思考时禁用
                     onChanged: widget.modelSupportsThinking
@@ -6183,14 +6247,24 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                 ),
               ),
               const SizedBox(height: 8),
-              // 三个并排按钮：图片 / 文件 / 提示词
+              // 四个并排按钮：拍照 / 图片 / 文件 / 提示词
               Row(
                 children: [
+                  Expanded(
+                    // 拍照（相机）——与图片同受多模态能力限制
+                    child: _panelButton(
+                      icon: Icons.photo_camera_outlined,
+                      onTap: widget.modelSupportsMultimodal
+                          ? widget.onTakePhoto
+                          : null,
+                      disabled: !widget.modelSupportsMultimodal,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
                   Expanded(
                     // 当前模型不支持多模态：变暗 + 图标斜杠 + 不可点
                     child: _panelButton(
                       icon: Icons.image_outlined,
-                      label: '图片',
                       onTap: widget.modelSupportsMultimodal
                           ? widget.onAddImage
                           : null,
@@ -6201,7 +6275,6 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                   Expanded(
                     child: _panelButton(
                       icon: Icons.folder_outlined,
-                      label: '文件',
                       onTap: widget.onAddFile,
                     ),
                   ),
@@ -6209,7 +6282,6 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                   Expanded(
                     child: _panelButton(
                       icon: Icons.auto_awesome,
-                      label: '提示词',
                       onTap: () {
                         Navigator.of(context).pop(); // 关面板
                         widget.onEditPrompt();
@@ -6356,7 +6428,7 @@ class _GlassInputBarState extends State<_GlassInputBar> {
   /// 不可点击
   Widget _panelButton({
     required IconData icon,
-    required String label,
+    String? label,
     VoidCallback? onTap,
     VoidCallback? onLongPress,
     bool large = false,
@@ -6405,16 +6477,18 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  label,
-                  // 禁用时文字用灰色（与内置工具等禁用按钮统一）
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: disabled
-                        ? Theme.of(context).colorScheme.onSurfaceVariant
-                        : null,
+                if (label != null) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    label,
+                    // 禁用时文字用灰色（与内置工具等禁用按钮统一）
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: disabled
+                          ? Theme.of(context).colorScheme.onSurfaceVariant
+                          : null,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),

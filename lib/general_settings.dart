@@ -35,6 +35,7 @@ class GeneralSettings {
     required this.titleStrategy,
     required this.aiTitleModel,
     required this.aiTitlePrompt,
+    required this.defaultSystemPrompt,
     required this.markdownEnabled,
     required this.latexEnabled,
     required this.mermaidEnabled,
@@ -57,6 +58,7 @@ class GeneralSettings {
     titleStrategy: TitleStrategy.ai,
     aiTitleModel: '',
     aiTitlePrompt: kDefaultTitlePrompt,
+    defaultSystemPrompt: '',
     markdownEnabled: true,
     latexEnabled: true,
     mermaidEnabled: true,
@@ -92,6 +94,9 @@ class GeneralSettings {
 
   /// AI 标题生成提示词（含 {{USER}}/{{ASSISTANT}} 占位符）
   final String aiTitlePrompt;
+
+  /// 默认 system 提示词：会话未设置自己的提示词时使用（空 = 不发送）
+  final String defaultSystemPrompt;
 
   /// Markdown 渲染开关
   final bool markdownEnabled;
@@ -138,6 +143,7 @@ class GeneralSettings {
     TitleStrategy? titleStrategy,
     String? aiTitleModel,
     String? aiTitlePrompt,
+    String? defaultSystemPrompt,
     bool? markdownEnabled,
     bool? latexEnabled,
     bool? mermaidEnabled,
@@ -157,6 +163,7 @@ class GeneralSettings {
     titleStrategy: titleStrategy ?? this.titleStrategy,
     aiTitleModel: aiTitleModel ?? this.aiTitleModel,
     aiTitlePrompt: aiTitlePrompt ?? this.aiTitlePrompt,
+    defaultSystemPrompt: defaultSystemPrompt ?? this.defaultSystemPrompt,
     markdownEnabled: markdownEnabled ?? this.markdownEnabled,
     latexEnabled: latexEnabled ?? this.latexEnabled,
     mermaidEnabled: mermaidEnabled ?? this.mermaidEnabled,
@@ -179,6 +186,7 @@ class GeneralSettings {
     'titleStrategy': titleStrategy.toJson(),
     'aiTitleModel': aiTitleModel,
     'aiTitlePrompt': aiTitlePrompt,
+    'defaultSystemPrompt': defaultSystemPrompt,
     'markdownEnabled': markdownEnabled,
     'latexEnabled': latexEnabled,
     'mermaidEnabled': mermaidEnabled,
@@ -207,6 +215,8 @@ class GeneralSettings {
       ),
       aiTitleModel: j['aiTitleModel'] as String? ?? d.aiTitleModel,
       aiTitlePrompt: j['aiTitlePrompt'] as String? ?? d.aiTitlePrompt,
+      defaultSystemPrompt:
+          j['defaultSystemPrompt'] as String? ?? d.defaultSystemPrompt,
       markdownEnabled: j['markdownEnabled'] as bool? ?? d.markdownEnabled,
       latexEnabled: j['latexEnabled'] as bool? ?? d.latexEnabled,
       mermaidEnabled: j['mermaidEnabled'] as bool? ?? d.mermaidEnabled,

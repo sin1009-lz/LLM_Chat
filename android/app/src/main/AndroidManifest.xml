@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 网络请求：测试连接 / 从 API 获取模型 -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 拍照（加号面板相机） -->
+    <uses-permission android:name="android.permission.CAMERA"/>
     <!-- 内置工具：获取地理位置（模型可查询设备位置） -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
@@ -46,6 +48,10 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <!-- image_picker：拍照（MediaStore.ACTION_IMAGE_CAPTURE） -->
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

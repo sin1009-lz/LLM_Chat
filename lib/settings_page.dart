@@ -3077,6 +3077,9 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
   late final TextEditingController _promptCtrl = TextEditingController(
     text: _s.aiTitlePrompt,
   );
+  late final TextEditingController _sysPromptCtrl = TextEditingController(
+    text: _s.defaultSystemPrompt,
+  );
   late final TextEditingController _thresholdCtrl = TextEditingController(
     text: _s.pasteThreshold.toString(),
   );
@@ -3099,6 +3102,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
   @override
   void dispose() {
     _promptCtrl.dispose();
+    _sysPromptCtrl.dispose();
     _thresholdCtrl.dispose();
     _archiveCtrl.dispose();
     _deleteCtrl.dispose();
@@ -3167,6 +3171,26 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           const SizedBox(height: 20),
 
           // ── 对话标题 ──
+          _sectionLabel('默认提示词'),
+          // 会话未设置自己的提示词时使用（空 = 不发送）；常驻编辑框
+          Material(
+            color: _buttonColor(context),
+            borderRadius: BorderRadius.circular(14),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: _projectInput(
+                context: context,
+                controller: _sysPromptCtrl,
+                label: '默认 System 提示词',
+                hint: '留空 = 新对话不发送 system',
+                maxLines: 6,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(defaultSystemPrompt: v)),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+
           _sectionLabel('对话标题'),
           for (final strategy in TitleStrategy.values) ...[
             _strategyTile(
