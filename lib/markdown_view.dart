@@ -49,37 +49,94 @@ class MarkdownView extends StatefulWidget {
 }
 
 class _MarkdownViewState extends State<MarkdownView> {
-  String _text = '';
+  /// 稳定前缀（已完成的段落）：只在变化时构建一次，Widget 实例复用
+  /// 后 Flutter 直接跳过该子树重建——流式期间每帧只重渲染活动尾段，
+  /// 每帧代价 O(尾段) 而非 O(全文)（此前全量重解析随长度越来越卡）
+  String _stableText = '';
+  Widget _stableChild = const SizedBox.shrink();
+
+  /// 活动尾段（正在生成的最后几百字，每帧重渲染）
+  String _tailText = '';
+
+  /// 上一帧完整文本（流式结束时把尾段并入前缀）
+  String _lastFull = '';
   Timer? _trailing;
   int _lastRenderMs = 0;
 
   @override
   void initState() {
     super.initState();
-    _text = widget.text;
     _lastRenderMs = DateTime.now().millisecondsSinceEpoch;
+    _applyText(widget.text);
   }
 
   @override
   void didUpdateWidget(MarkdownView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.text != _text) _coalesce();
+    if (widget.text == _lastFull) {
+      // 文本不再变化（流式结束）：全部并入稳定前缀
+      _promoteAll();
+    } else if (widget.text != _lastFull) {
+      _coalesce();
+    }
   }
 
-  /// 流式节流：新文本 33ms 内只重渲一次（~30fps），尾帧 Timer 补齐
-  /// 保证最终完整内容必达。markdown 全量重解析 + 代码高亮是流式期间
-  /// 最重的开销，节流后长回复滚动/渲染不卡
+  /// 文本 → 预处理 → 切分稳定/尾段；前缀变化才重建前缀子树
+  void _applyText(String text) {
+    _lastFull = text;
+    final data = widget.latexEnabled
+        ? widget._preprocessLatex(text)
+        : (text.isEmpty ? ' ' : text);
+    final split = _safeSplit(data);
+    final stable = split <= 0 ? '' : data.substring(0, split);
+    final tail = split <= 0 ? data : data.substring(split);
+    if (stable != _stableText) {
+      _stableText = stable;
+      _stableChild = RepaintBoundary(child: widget._buildBody(context, stable));
+    }
+    _tailText = tail;
+  }
+
+  /// 流式结束（连续两帧文本相同）：尾段全部并入稳定前缀
+  void _promoteAll() {
+    if (_tailText.isEmpty) return;
+    final data = _stableText + _tailText;
+    _stableText = data;
+    _stableChild = RepaintBoundary(child: widget._buildBody(context, data));
+    _tailText = '';
+    setState(() {});
+  }
+
+  /// 安全切分点：最后一个段落边界（\n\n）且距末尾 ≥ 尾窗、
+  /// 不在代码围栏内（围栏数偶数）。找不到返回 0（全文作为尾段）
+  int _safeSplit(String data) {
+    const tailWindow = 420;
+    if (data.length < tailWindow * 2) return 0;
+    var i = data.lastIndexOf('\\nn');
+    while (i > 0 && data.length - i < tailWindow) {
+      i = data.lastIndexOf('\\nn', i - 1);
+    }
+    final fence = RegExp(r'^```', multiLine: true);
+    while (i > 0) {
+      final fences = fence.allMatches(data).where((m) => m.start < i).length;
+      if (fences.isEven) break; // 边界在围栏外
+      i = data.lastIndexOf('\\nn', i - 1);
+    }
+    return i > 0 ? i + 2 : 0; // 边界含空行归前缀
+  }
+
+  /// 帧合并（33ms）：仅合并 setState 调用；解析代价已被切分根治
   void _coalesce() {
     _trailing?.cancel();
     final now = DateTime.now().millisecondsSinceEpoch;
     final elapsed = now - _lastRenderMs;
     if (elapsed >= 33) {
       _lastRenderMs = now;
-      setState(() => _text = widget.text);
+      setState(() => _applyText(widget.text));
     } else {
       _trailing = Timer(Duration(milliseconds: 33 - elapsed), () {
         _lastRenderMs = DateTime.now().millisecondsSinceEpoch;
-        if (mounted) setState(() => _text = widget.text);
+        if (mounted) setState(() => _applyText(widget.text));
       });
     }
   }
@@ -91,22 +148,29 @@ class _MarkdownViewState extends State<MarkdownView> {
   }
 
   @override
-  Widget build(BuildContext context) => widget._render(context, _text);
+  Widget build(BuildContext context) {
+    if (_stableText.isEmpty) {
+      return widget._buildBody(context, _tailText);
+    }
+    if (_tailText.isEmpty) {
+      return _stableChild;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [_stableChild, widget._buildBody(context, _tailText)],
+    );
+  }
 }
 
 extension _MarkdownViewRender on MarkdownView {
-  /// 渲染主体（State 持节流后的 [text] 调用）
-  Widget _render(BuildContext context, String text) {
+  /// 渲染主体：[data] 为已预处理的 markdown 文本（稳定前缀/尾段共用）
+  Widget _buildBody(BuildContext context, String data) {
     final theme = Theme.of(context);
     final textColor = isUser ? Colors.white : theme.colorScheme.onSurface;
+    // 链接色：中性深灰（与整体无蓝紫体系一致）
     final linkColor = isUser
         ? Colors.white70
-        : theme.colorScheme.primary.withValues(alpha: 0.9);
-
-    // LaTeX 预处理：把 $...$ / $$...$$ 转成代码块/行内代码占位（builder 内识别）
-    final data = latexEnabled
-        ? _preprocessLatex(text)
-        : (text.isEmpty ? ' ' : text);
+        : theme.colorScheme.onSurface.withValues(alpha: 0.75);
 
     return MarkdownBody(
       data: data,

@@ -12,6 +12,10 @@ import 'general_settings.dart';
 /// 后台 isolate 用的会话序列化（ChatStore.save 经 compute 调用）
 String _encodeConversationJson(Conversation c) => jsonEncode(c.toJson());
 
+/// 请求体 JSON 编码（isolate 内执行）：含 N 张 base64 图片的请求体
+/// 可达几十 MB，主线程同步编码是上传卡顿来源
+String _encodeRequestBody(Map<String, dynamic> body) => jsonEncode(body);
+
 /// 角色枚举（仅 user / assistant，system 在请求时按需构造）
 enum Role { user, assistant }
 
@@ -201,24 +205,35 @@ class ImagePart {
     required this.name,
     required this.mimeType,
     required this.dataUrl,
+    this.thumbUrl,
   });
 
   final String name;
   final String mimeType;
 
-  /// data:image/xxx;base64,...
+  /// 发送给 AI 的中档压缩 JPEG（data:image/jpeg;base64,...）
   final String dataUrl;
+
+  /// 前端小图（低分辨率缩略 data URL，气泡/网格显示用）：
+  /// 小 10-20 倍，列表滚动零解码压力；null = 用 dataUrl 兜底
+  /// （旧消息无缩略图）
+  String? thumbUrl;
+
+  /// 前端显示用：优先小图
+  String get displayUrl => thumbUrl ?? dataUrl;
 
   Map<String, dynamic> toJson() => {
     'name': name,
     'mimeType': mimeType,
     'dataUrl': dataUrl,
+    'thumbUrl': thumbUrl,
   };
 
   factory ImagePart.fromJson(Map<String, dynamic> j) => ImagePart(
     name: j['name'] as String? ?? '',
     mimeType: j['mimeType'] as String? ?? 'image/jpeg',
     dataUrl: j['dataUrl'] as String? ?? '',
+    thumbUrl: j['thumbUrl'] as String?,
   );
 }
 
@@ -1087,7 +1102,8 @@ class LlmService {
     ];
     final req = http.Request('POST', url)
       ..headers['Content-Type'] = 'application/json'
-      ..body = jsonEncode({
+      // 大请求体（含 base64 图片）在 isolate 编码，防主线程卡顿
+      ..body = await compute(_encodeRequestBody, {
         'model': model,
         'messages': messages,
         'stream': true,
@@ -1212,7 +1228,8 @@ class LlmService {
     );
     final req = http.Request('POST', url)
       ..headers['Content-Type'] = 'application/json'
-      ..body = jsonEncode({
+      // 大请求体（含 base64 图片）在 isolate 编码，防主线程卡顿
+      ..body = await compute(_encodeRequestBody, {
         'model': model,
         'messages': messages,
         'stream': true,

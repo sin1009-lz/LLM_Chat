@@ -51,3 +51,4 @@ android/.cxx/
 android/local.properties
 *.apk
 !screenshots/*.png
+零件001_2D.png

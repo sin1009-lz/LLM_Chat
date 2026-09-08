@@ -36,6 +36,13 @@ class GeneralSettings {
     required this.aiTitleModel,
     required this.aiTitlePrompt,
     required this.defaultSystemPrompt,
+    required this.ttsEnabled,
+    required this.ttsUseApi,
+    required this.ttsBaseUrl,
+    required this.ttsApiKey,
+    required this.ttsModel,
+    required this.ttsVoice,
+    required this.ttsSpeed,
     required this.markdownEnabled,
     required this.latexEnabled,
     required this.mermaidEnabled,
@@ -59,6 +66,13 @@ class GeneralSettings {
     aiTitleModel: '',
     aiTitlePrompt: kDefaultTitlePrompt,
     defaultSystemPrompt: '',
+    ttsEnabled: false,
+    ttsUseApi: false,
+    ttsBaseUrl: '',
+    ttsApiKey: '',
+    ttsModel: '',
+    ttsVoice: '',
+    ttsSpeed: 1.0,
     markdownEnabled: true,
     latexEnabled: true,
     mermaidEnabled: true,
@@ -97,6 +111,29 @@ class GeneralSettings {
 
   /// 默认 system 提示词：会话未设置自己的提示词时使用（空 = 不发送）
   final String defaultSystemPrompt;
+
+  /// 语音朗读（系统 TTS）开关
+  final bool ttsEnabled;
+
+  /// 在线语音 API 优先（OpenAI 兼容 /audio/speech；系统引擎不可用时
+  /// 的主方案——多数国产 ROM 的系统 TTS 不给第三方绑定）
+  final bool ttsUseApi;
+
+  /// 语音 API 端点（完整 URL，如
+  /// https://api.siliconflow.cn/v1/audio/speech）
+  final String ttsBaseUrl;
+
+  /// 语音 API 密钥
+  final String ttsApiKey;
+
+  /// 语音合成模型（如 FunAudioLLM/CosyVoice2-0.5B）
+  final String ttsModel;
+
+  /// 音色名（如 alex / anna；具体取决于服务）
+  final String ttsVoice;
+
+  /// 语速（0.25-4.0，1.0 正常）
+  final double ttsSpeed;
 
   /// Markdown 渲染开关
   final bool markdownEnabled;
@@ -144,6 +181,13 @@ class GeneralSettings {
     String? aiTitleModel,
     String? aiTitlePrompt,
     String? defaultSystemPrompt,
+    bool? ttsEnabled,
+    bool? ttsUseApi,
+    String? ttsBaseUrl,
+    String? ttsApiKey,
+    String? ttsModel,
+    String? ttsVoice,
+    double? ttsSpeed,
     bool? markdownEnabled,
     bool? latexEnabled,
     bool? mermaidEnabled,
@@ -164,6 +208,13 @@ class GeneralSettings {
     aiTitleModel: aiTitleModel ?? this.aiTitleModel,
     aiTitlePrompt: aiTitlePrompt ?? this.aiTitlePrompt,
     defaultSystemPrompt: defaultSystemPrompt ?? this.defaultSystemPrompt,
+    ttsEnabled: ttsEnabled ?? this.ttsEnabled,
+    ttsUseApi: ttsUseApi ?? this.ttsUseApi,
+    ttsBaseUrl: ttsBaseUrl ?? this.ttsBaseUrl,
+    ttsApiKey: ttsApiKey ?? this.ttsApiKey,
+    ttsModel: ttsModel ?? this.ttsModel,
+    ttsVoice: ttsVoice ?? this.ttsVoice,
+    ttsSpeed: ttsSpeed ?? this.ttsSpeed,
     markdownEnabled: markdownEnabled ?? this.markdownEnabled,
     latexEnabled: latexEnabled ?? this.latexEnabled,
     mermaidEnabled: mermaidEnabled ?? this.mermaidEnabled,
@@ -187,6 +238,13 @@ class GeneralSettings {
     'aiTitleModel': aiTitleModel,
     'aiTitlePrompt': aiTitlePrompt,
     'defaultSystemPrompt': defaultSystemPrompt,
+    'ttsEnabled': ttsEnabled,
+    'ttsUseApi': ttsUseApi,
+    'ttsBaseUrl': ttsBaseUrl,
+    'ttsApiKey': ttsApiKey,
+    'ttsModel': ttsModel,
+    'ttsVoice': ttsVoice,
+    'ttsSpeed': ttsSpeed,
     'markdownEnabled': markdownEnabled,
     'latexEnabled': latexEnabled,
     'mermaidEnabled': mermaidEnabled,
@@ -217,6 +275,13 @@ class GeneralSettings {
       aiTitlePrompt: j['aiTitlePrompt'] as String? ?? d.aiTitlePrompt,
       defaultSystemPrompt:
           j['defaultSystemPrompt'] as String? ?? d.defaultSystemPrompt,
+      ttsEnabled: j['ttsEnabled'] as bool? ?? d.ttsEnabled,
+      ttsUseApi: j['ttsUseApi'] as bool? ?? d.ttsUseApi,
+      ttsBaseUrl: j['ttsBaseUrl'] as String? ?? d.ttsBaseUrl,
+      ttsApiKey: j['ttsApiKey'] as String? ?? d.ttsApiKey,
+      ttsModel: j['ttsModel'] as String? ?? d.ttsModel,
+      ttsVoice: j['ttsVoice'] as String? ?? d.ttsVoice,
+      ttsSpeed: (j['ttsSpeed'] as num?)?.toDouble() ?? d.ttsSpeed,
       markdownEnabled: j['markdownEnabled'] as bool? ?? d.markdownEnabled,
       latexEnabled: j['latexEnabled'] as bool? ?? d.latexEnabled,
       mermaidEnabled: j['mermaidEnabled'] as bool? ?? d.mermaidEnabled,

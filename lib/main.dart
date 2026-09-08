@@ -8,12 +8,17 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:cupertino_liquid_glass/cupertino_liquid_glass.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as im;
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:inspire_blur/inspire_blur.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -47,8 +52,12 @@ ModelKey? _decodeModelKey(String s) {
 }
 
 /// 品牌色：亮色模式与暗色模式各一份
-const Color kBrandColorLight = Color(0xFF3D5AFE);
-const Color kBrandColorDark = Color(0xFF8C9EFF);
+/// 品牌色：中性石墨/银灰体系（彻底无蓝紫）
+const Color kBrandColorLight = Color(0xFF424942);
+
+/// 用户消息气泡专用蓝（仅气泡，不参与全局主题种子）
+const Color kUserBubbleColor = Color(0xFF3D5AFE);
+const Color kBrandColorDark = Color(0xFFB8BCB8);
 
 /// 页面过渡：新页面从右滑入覆盖，前页面保持原位不动
 /// （不左移、不缩小、不变透明——去掉 iOS 风格旧页左移效果）
@@ -381,6 +390,236 @@ class _HomePageState extends State<HomePage>
   /// 思考深度状态（四档）：0 none / 1 low / 2 high / 3 max
   int _thinkingDepth = 0;
 
+  /// 渲染纪元：影响消息显示但不在消息对象里的全局状态变化时自增
+  /// （思考深度/渲染开关/替换规则/分支拓扑切换）——消息项签名计入，
+  /// 变化即全列表失效缓存，杜绝「设置改了界面不动」类漏洞
+  int _renderEpoch = 0;
+
+  // ── 系统 TTS（朗读助手消息）──
+  FlutterTts? _tts;
+
+  /// 正在朗读的消息对象（null = 空闲）；同屏仅一条在播
+  Message? _speakingMsg;
+
+  /// 引擎可用（设备无 TTS 引擎时按钮置灰）
+  bool _ttsReady = false;
+
+  /// 懒初始化系统 TTS 引擎（首次点喇叭时）。
+  /// 部分设备（如小米 mibrain）首帧初始化报 -1（瞬态失败）——
+  /// 显式指定引擎 + 短暂重试；语言逐级回退（zh-CN → zh → 默认）
+  Future<void> _initTts() async {
+    if (_tts != null) return;
+    final t = FlutterTts();
+    try {
+      // 语言逐级回退（zh-CN → zh）；探测失败也继续用默认语言
+      await t.setLanguage('zh-CN');
+      await t.setSpeechRate(0.5);
+      t.setStartHandler(() {
+        if (mounted) setState(() {}); // 播放态由 _speakingMsg 驱动
+      });
+      t.setCompletionHandler(() {
+        _speakingMsg = null;
+        if (mounted) setState(() {});
+      });
+      t.setErrorHandler((msg) {
+        _speakingMsg = null;
+        if (mounted) setState(() {});
+      });
+      // cancel/stop 也结束朗读态
+      t.setCancelHandler(() {
+        _speakingMsg = null;
+        if (mounted) setState(() {});
+      });
+      _ttsReady = true;
+      _tts = t;
+    } catch (_) {
+      _ttsReady = false;
+      // init -1 常为瞬态：短暂等待后重试一次（重试仍失败则放弃本次）
+      await Future.delayed(const Duration(milliseconds: 600));
+      try {
+        await t.setLanguage('zh-CN');
+        _ttsReady = true;
+      } catch (_) {
+        _ttsReady = false;
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// 朗读/停止切换：同一条再点 = 停止；新消息点 = 换朗读对象
+  Future<void> _toggleSpeak(Message m) async {
+    await _initTts();
+    final t = _tts;
+    if (t == null || !_ttsReady) {
+      _toast('设备无可用语音引擎');
+      return;
+    }
+    if (identical(_speakingMsg, m)) {
+      await t.stop();
+      _speakingMsg = null;
+      if (mounted) setState(() {});
+      return;
+    }
+    // 在线 API 优先（配置了就云端合成；本机引擎多不可用）
+    if (_general.ttsUseApi && _general.ttsBaseUrl.trim().isNotEmpty) {
+      await _speakViaApi(m);
+      return;
+    }
+    // 切换朗读对象：先停旧的
+    await t.stop();
+    final text = applyDisplayRules(m.content, _replaceRules).trim();
+    // 长文截断：系统 TTS 队列过长易卡，3000 字足够听
+    final speakText = text.length > 3000
+        ? '${text.substring(0, 3000)}……'
+        : text;
+    if (speakText.isEmpty) return;
+    setState(() => _speakingMsg = m);
+    await t.speak(speakText);
+  }
+
+  /// 停止朗读（切换会话/删除消息等场景调用）
+  Future<void> _stopSpeaking() async {
+    if (_speakingMsg == null) return;
+    _speakingMsg = null;
+    _speakSession++; // 伪流式管道整体失效（在途合成/播放全部作废）
+    await _tts?.stop();
+    await _audioPlayer?.stop();
+    if (mounted) setState(() {});
+  }
+
+  // ── 在线语音 API（OpenAI 兼容 /audio/speech；系统 TTS 引擎在
+  // 部分国产 ROM 上不给第三方绑定，这是主朗读方案）──
+  AudioPlayer? _audioPlayer;
+
+  /// 朗读会话号：每次开始/停止自增——旧的分段管道据此自杀
+  int _speakSession = 0;
+
+  /// 伪流式朗读（Kimi 思路）：文本按语义切段，逐段合成 + 播放当前段时
+  /// 预取下一段——首段几百毫秒即出声，段间几乎无感衔接。
+  /// [_speakSession] 会话号：停止/切消息时自增使旧管道整体失效
+  Future<void> _speakViaApi(Message m) async {
+    final g = _general;
+    if (g.ttsBaseUrl.trim().isEmpty) {
+      _toast('未配置语音 API 地址（设置 → 语音朗读）');
+      return;
+    }
+    final text = applyDisplayRules(m.content, _replaceRules).trim();
+    if (text.isEmpty) return;
+    final segs = _splitForTts(text, maxTotal: 3000);
+    if (segs.isEmpty) return;
+    final session = ++_speakSession;
+    setState(() => _speakingMsg = m);
+    final player = _audioPlayer ??= AudioPlayer();
+    await player.stop();
+    try {
+      // 预取第 0 段；播放第 i 段期间预取第 i+1 段（流水线）
+      var prefetch = _synthSegment(segs[0]);
+      for (var i = 0; i < segs.length; i++) {
+        if (session != _speakSession) return;
+        final bytes = await prefetch;
+        if (session != _speakSession) return;
+        if (i + 1 < segs.length) {
+          prefetch = _synthSegment(segs[i + 1]);
+        }
+        await player.setAudioSource(_BytesAudioSource(bytes));
+        // play() 的 Future 在本段播完时完成（衔接下一段）
+        await player.play();
+      }
+    } catch (e) {
+      if (session == _speakSession) {
+        _toast('语音合成失败：$e');
+      }
+    } finally {
+      if (session == _speakSession) {
+        _speakingMsg = null;
+        if (mounted) setState(() {});
+      }
+    }
+  }
+
+  /// 合成一小段（OpenAI 兼容 /audio/speech → MP3 字节）
+  Future<Uint8List> _synthSegment(String seg) async {
+    final g = _general;
+    final resp = await http
+        .post(
+          Uri.parse(g.ttsBaseUrl.trim()),
+          headers: {
+            'Authorization': 'Bearer ${g.ttsApiKey.trim()}',
+            'content-type': 'application/json',
+            'accept': 'audio/mpeg',
+          },
+          body: jsonEncode({
+            if (g.ttsModel.trim().isNotEmpty) 'model': g.ttsModel.trim(),
+            'input': seg,
+            if (g.ttsVoice.trim().isNotEmpty) 'voice': g.ttsVoice.trim(),
+            'response_format': 'mp3',
+            'speed': g.ttsSpeed,
+          }),
+        )
+        .timeout(const Duration(seconds: 45));
+    if (resp.statusCode != 200) {
+      throw Exception('HTTP ${resp.statusCode}');
+    }
+    return resp.bodyBytes;
+  }
+
+  /// TTS 分段：换行/强标点（。！？；）优先断句，短句向后聚合到
+  /// 足够长度（避免每句一请求的开销与顿挫），超长句在软标点回退切。
+  /// 语义边界断开——不在词中间割裂
+  List<String> _splitForTts(
+    String text, {
+    int minLen = 24,
+    int maxTotal = 3000,
+  }) {
+    final out = <String>[];
+    var buf = '';
+    var total = 0;
+    void flush() {
+      final t = buf.trim();
+      if (t.isNotEmpty && total < maxTotal) {
+        out.add(t);
+        total += t.length;
+      }
+      buf = '';
+    }
+
+    void addSentence(String s) {
+      // 超长句（无强标点的长文本）：按软标点/空格回退切
+      if (s.length > 120) {
+        var rest = s;
+        while (rest.length > 120) {
+          var cut = rest.lastIndexOf(RegExp(r'[，,、　 ]'), 120);
+          if (cut < 40) cut = 120;
+          flush();
+          out.add(rest.substring(0, cut).trim());
+          total += cut;
+          rest = rest.substring(cut);
+        }
+        buf = rest;
+        flush();
+        return;
+      }
+      buf += s;
+      // 攒够最小段长（强标点结尾）→ 成段
+      if (buf.length >= minLen && RegExp(r'[。！？!?；;]$').hasMatch(buf.trim())) {
+        flush();
+      }
+    }
+
+    for (final line in text.split('\n')) {
+      if (line.trim().isEmpty) {
+        flush();
+        continue;
+      }
+      for (final sent in line.split(RegExp(r'(?<=[。！？!?；;])'))) {
+        addSentence(sent);
+      }
+      flush(); // 行末强制成段
+    }
+    flush();
+    return out;
+  }
+
   /// 页眉模型选择：当前模型名（裸 id，来自设置页提供方，默认无）
   String _modelName = '';
 
@@ -575,6 +814,7 @@ class _HomePageState extends State<HomePage>
     final fileParts = <MessageFilePart>[];
     final nameParts = <String>[];
     for (final att in _attachments) {
+      if (att.loading) continue; // 压缩占位不进消息
       if (!att.isImage) {
         // PDF 解析为图像（通用设置开启时）：渲染每页为 PNG 图片，
         // 多模态模型可直接查看内容；失败/无页 → 降级为文件名
@@ -616,16 +856,54 @@ class _HomePageState extends State<HomePage>
           nameParts.add(att.name);
           continue;
         }
-        final mime = _mimeFromName(att.name);
+        // 双档压缩全部走原生（C 实现，快且稳——此前 compute 里的纯
+        // Dart 解码对部分图抛异常 → catch 降级成文本附件
+        // 「[附件: img_xxx.jpg]」，即图片变文本的根源）：
+        // AI 档 = 1568px/80；前端档 = 320px/60
+        final aiBytes = await compressSingleImageNative(
+          bytes,
+          maxSide: _imgMaxSide,
+          quality: _imgQuality,
+        );
+        final aiUrl = 'data:image/jpeg;base64,${base64Encode(aiBytes)}';
+        // 前端小图：从 AI 档再缩（原生，快）
+        Uint8List thumbBytes;
+        try {
+          thumbBytes = await FlutterImageCompress.compressWithList(
+            aiBytes,
+            minWidth: 320,
+            minHeight: 320,
+            quality: 60,
+            format: CompressFormat.jpeg,
+          );
+        } catch (_) {
+          thumbBytes = aiBytes;
+        }
+        final thumbUrl = 'data:image/jpeg;base64,${base64Encode(thumbBytes)}';
         imageParts.add(
           ImagePart(
             name: att.name,
-            mimeType: mime,
-            dataUrl: 'data:$mime;base64,${base64Encode(bytes)}',
+            mimeType: 'image/jpeg',
+            dataUrl: aiUrl,
+            thumbUrl: thumbUrl,
           ),
         );
       } catch (_) {
-        // 读取失败：降级为文件名
+        // 兜底：原生压缩失败也不降级为文本——原图直传（保图片语义）
+        try {
+          final bytes = await att.readBytes();
+          if (bytes.isNotEmpty) {
+            final mime = _mimeFromName(att.name);
+            imageParts.add(
+              ImagePart(
+                name: att.name,
+                mimeType: mime,
+                dataUrl: 'data:$mime;base64,${base64Encode(bytes)}',
+              ),
+            );
+            continue;
+          }
+        } catch (_) {}
         nameParts.add(att.name);
       }
     }
@@ -2596,6 +2874,7 @@ class _HomePageState extends State<HomePage>
           },
           replaceRules: _replaceRules,
           onReplaceRulesChanged: (rules) {
+            _renderEpoch++;
             // 文字替换规则变更：原地更新同一列表（设置页持有的引用同步生效，
             // 无需退出重进）+ 固化存档
             setState(() {
@@ -2619,6 +2898,7 @@ class _HomePageState extends State<HomePage>
           },
           generalSettings: _general,
           onGeneralSettingsChanged: (s) {
+            _renderEpoch++;
             // 通用设置变更：立即生效 + 固化存档
             setState(() => _general = s);
             _store?.saveGeneralSettings(s);
@@ -2670,49 +2950,97 @@ class _HomePageState extends State<HomePage>
   /// CustomScrollView center 锚点 key（消息列表顶部锚定）
   final GlobalKey _listCenterKey = GlobalKey();
 
-  /// 选择图片（系统相册多选），完成后关闭加号面板
+  /// 选择图片（系统相册多选）。不带压缩参数——插件内建 resize 在
+  /// Android Photo Picker 路径不生效/部分路径生效时也在返回前同步
+  /// 逐张全尺寸解码（选大量图期间白屏的根源）。原图直接交给
+  /// _compressAndAddImages 的 isolate 管道逐张压缩落盘
   Future<void> _pickImages() async {
-    final files = await ImagePicker().pickMultiImage(
-      maxWidth: _imgMaxSide,
-      maxHeight: _imgMaxSide,
-      imageQuality: _imgQuality,
-    );
+    final picked = await ImagePicker().pickMultiImage();
     if (!mounted) return;
-    if (files.isNotEmpty) {
-      setState(() {
-        _attachments.addAll(
-          files.map(
-            (f) => _Attachment(isImage: true, name: f.name, path: f.path),
-          ),
-        );
-      });
+    Navigator.of(context).pop(); // 先关面板（压缩后台逐张进行）
+    if (picked.isNotEmpty) {
+      await _compressAndAddImages(picked.map((f) => f.path).toList());
     }
-    Navigator.of(context).pop(); // 关闭加号面板
   }
 
-  /// 图片规范化参数：限制最长边 2048 + 质量 85——image_picker 会
+  /// 图片规范化参数：限制最长边 1600 + 质量 80——image_picker 会
   /// 重新编码并把 EXIF 旋转烘焙进像素（模型端不解 EXIF，原图直传
-  /// 竖拍会横躺）；相机/图库统一走这套，拍的照和选的图完全一致
-  static const _imgMaxSide = 2048.0;
-  static const _imgQuality = 85;
+  /// 竖拍会横躺）；相机/图库统一走这套。1600/80 对多模态识别足够，
+  /// 且大幅降低多图时的内存峰值（选图解码位图 + base64 副本链）
+  static const _imgMaxSide = 1568.0;
+  static const _imgQuality = 80;
 
   /// 拍照（相机）：拍一张作为图片附件（与图片入口同链路同规格）
   Future<void> _takePhoto() async {
-    final shot = await ImagePicker().pickImage(
-      source: ImageSource.camera,
-      maxWidth: _imgMaxSide,
-      maxHeight: _imgMaxSide,
-      imageQuality: _imgQuality,
-    );
+    final shot = await ImagePicker().pickImage(source: ImageSource.camera);
     if (!mounted) return;
+    Navigator.of(context).pop(); // 关面板后后台落盘
     if (shot != null) {
-      setState(() {
-        _attachments.add(
-          _Attachment(isImage: true, name: shot.name, path: shot.path),
-        );
-      });
+      await _compressAndAddImages([shot.path]);
     }
-    Navigator.of(context).pop(); // 关闭加号面板
+  }
+
+  /// 选图后立即逐张落盘暂存（附件条持有压缩后的临时小文件副本）：
+  /// 把 N 张原图同时驻留内存的峰值，平摊为逐张处理；
+  /// 逐张追加到附件条，用户能看到进度
+  Future<void> _compressAndAddImages(List<String> paths) async {
+    final dir = await getTemporaryDirectory();
+    final imgDir = Directory('${dir.path}/img_cache');
+    if (!imgDir.existsSync()) imgDir.createSync(recursive: true);
+    // 先铺满占位卡片（与选中数量一致）：用户立即看到全部格子转圈，
+    // 而非空白等待——每张压缩完成后原位替换为真实缩略图
+    final base = _attachments.length;
+    setState(() {
+      _attachments.addAll(
+        paths
+            .map(
+              (p) => const _Attachment(
+                isImage: true,
+                name: 'loading',
+                loading: true,
+              ),
+            )
+            .toList(),
+      );
+    });
+    for (var i = 0; i < paths.length; i++) {
+      try {
+        // 压缩在 isolate 逐张完成（原图 → 1568px/80 小文件）：
+        // UI 线程全程零解码、零编码
+        final raw = await File(paths[i]).readAsBytes();
+        final compressed = await compressSingleImageNative(
+          raw,
+          maxSide: _imgMaxSide,
+          quality: _imgQuality,
+        );
+        final name =
+            'img_${DateTime.now().microsecondsSinceEpoch}_'
+            '${paths[i].hashCode.abs()}.jpg';
+        final dest = File('${imgDir.path}/$name');
+        await dest.writeAsBytes(compressed, flush: true);
+        if (!mounted) return;
+        final idx = base + i;
+        if (idx < _attachments.length) {
+          setState(() {
+            _attachments[idx] = _Attachment(
+              isImage: true,
+              name: name,
+              path: dest.path,
+            );
+          });
+        }
+        // 帧间隔：让刚替换的缩略图有机会渲染
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      } catch (_) {
+        // 单张失败：移除对应占位（不阻塞其余图片）
+        if (mounted) {
+          final idx = base + i;
+          if (idx < _attachments.length) {
+            setState(() => _attachments.removeAt(idx));
+          }
+        }
+      }
+    }
   }
 
   /// 选择文件（系统文件多选）。选择完成后**不关闭加号面板**
@@ -3298,6 +3626,7 @@ class _HomePageState extends State<HomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _tts?.stop();
     _streamSub?.cancel();
     _maintainTimer?.cancel();
     _chatScroll.dispose();
@@ -3376,9 +3705,20 @@ class _HomePageState extends State<HomePage>
                 }
                 final msgIndex = index - 1 - (showSystem ? 1 : 0);
                 final m = messages[msgIndex];
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: _messageBubble(context, m, msgIndex),
+                // _MessageItem：参数化组件——流式期间 HomePage setState
+                // 触发列表重建时，静态消息项的构造参数完全相同，
+                // Flutter 按参数相等跳过其子树 rebuild（此前每次 setState
+                // 全列表所有气泡都重新 build，是流式滚动卡顿的大头）
+                return _MessageItem(
+                  message: m,
+                  index: msgIndex,
+                  editing: _editingIndex == msgIndex,
+                  branchEditing: _branchIndex == msgIndex,
+                  streaming:
+                      _isResponding &&
+                      m.role != Role.user &&
+                      msgIndex == messages.length - 1,
+                  epoch: _renderEpoch,
                 );
               }, childCount: 1 + (showSystem ? 1 : 0) + messages.length),
             ),
@@ -3509,178 +3849,186 @@ class _HomePageState extends State<HomePage>
             thinkingDepth: _thinkingDepth,
             onThinkingDepthChanged: (depth) {
               // 面板滑动条与抽屉栏按钮共用同一状态：立即生效 + 持久化
-              setState(() => _thinkingDepth = depth);
+              setState(() {
+                _thinkingDepth = depth;
+                _renderEpoch++;
+              });
               _store?.saveThinkingDepth(depth);
             },
             modelSupportsMultimodal: _modelSupportsMultimodal,
             modelSupportsTools: _modelSupportsTools,
             modelSupportsThinking: _modelSupportsThinking,
             hasAttachments: _attachments.isNotEmpty,
+            attachmentsAllLoading:
+                _attachments.isNotEmpty && _attachments.every((a) => a.loading),
           ),
         ),
       ],
     );
 
-    return Scaffold(
-      // 键盘弹出时主界面不整体上移（输入栏自行随键盘升起）
-      resizeToAvoidBottomInset: false,
-      body: Stack(
-        children: [
-          // ── 抽屉页面（浅灰背景，被主页面盖住）──
-          // RepaintBoundary：抽屉（历史对话列表）缓存为静态层，
-          // 动画期间主页面右移露出时不逐帧重绘
-          Positioned.fill(
-            child: RepaintBoundary(child: _buildDrawer(topPad: topPad)),
-          ),
+    return _HomePageScope(
+      state: this,
+      child: Scaffold(
+        // 键盘弹出时主界面不整体上移（输入栏自行随键盘升起）
+        resizeToAvoidBottomInset: false,
+        body: Stack(
+          children: [
+            // ── 抽屉页面（浅灰背景，被主页面盖住）──
+            // RepaintBoundary：抽屉（历史对话列表）缓存为静态层，
+            // 动画期间主页面右移露出时不逐帧重绘
+            Positioned.fill(
+              child: RepaintBoundary(child: _buildDrawer(topPad: topPad)),
+            ),
 
-          // ── 主页面：右滑 → 右移 + 缩小 + 圆角 + 变暗变模糊 ──
-          // 动画期间仅重建受进度 t 影响的部分（变换/投影/变暗遮罩），
-          // 消息列表等静态内容作为 child 复用，避免每帧重建导致卡顿
-          AnimatedBuilder(
-            animation: _drawerController,
-            builder: (context, child) {
-              final tt = _drawerController.value;
-              final shift = tt * _drawerShift;
-              // 不缩放：只平移（避免大纹理每帧重采样开销 + 视觉更简洁）
-              return Transform.translate(
-                offset: Offset(shift, 0),
-                // 主页面底部投影（悬浮感）：参数固定（不随动画进度变化）——
-                // 若 alpha 变化，blurRadius 24 的模糊每帧重算导致卡顿
-                child: Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(radius),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.3),
-                        blurRadius: 24,
-                        offset: const Offset(0, 10),
-                      ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(radius),
-                    child: Stack(
-                      children: [
-                        // 主页面不透明底（缩放/圆角时不透出下层抽屉内容）
-                        Container(
-                          color: Theme.of(context).scaffoldBackgroundColor,
-                        ),
-                        child!,
-                        // 半透明变暗遮罩（随进度渐变，无模糊）
-                        IgnorePointer(
-                          child: Container(
-                            color: Colors.black.withValues(alpha: tt * 0.35),
-                          ),
+            // ── 主页面：右滑 → 右移 + 缩小 + 圆角 + 变暗变模糊 ──
+            // 动画期间仅重建受进度 t 影响的部分（变换/投影/变暗遮罩），
+            // 消息列表等静态内容作为 child 复用，避免每帧重建导致卡顿
+            AnimatedBuilder(
+              animation: _drawerController,
+              builder: (context, child) {
+                final tt = _drawerController.value;
+                final shift = tt * _drawerShift;
+                // 不缩放：只平移（避免大纹理每帧重采样开销 + 视觉更简洁）
+                return Transform.translate(
+                  offset: Offset(shift, 0),
+                  // 主页面底部投影（悬浮感）：参数固定（不随动画进度变化）——
+                  // 若 alpha 变化，blurRadius 24 的模糊每帧重算导致卡顿
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(radius),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.3),
+                          blurRadius: 24,
+                          offset: const Offset(0, 10),
                         ),
                       ],
                     ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(radius),
+                      child: Stack(
+                        children: [
+                          // 主页面不透明底（缩放/圆角时不透出下层抽屉内容）
+                          Container(
+                            color: Theme.of(context).scaffoldBackgroundColor,
+                          ),
+                          child!,
+                          // 半透明变暗遮罩（随进度渐变，无模糊）
+                          IgnorePointer(
+                            child: Container(
+                              color: Colors.black.withValues(alpha: tt * 0.35),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
+                );
+              },
+              // RepaintBoundary：主页面（消息列表/玻璃模糊/输入栏）缓存为
+              // 静态纹理层——抽屉动画期间 Transform 直接操作缓存层，
+              // 不逐帧重绘内部（消息多时避免每帧绘制大量气泡与模糊导致卡顿）
+              child: RepaintBoundary(
+                child: Stack(
+                  children: [
+                    // 主内容：列表/页眉/输入栏（静态，动画期间复用）
+                    mainContent,
+                    // 附件条：主界面内（随 Transform 移动），
+                    // 位置绑定输入栏容器顶边；被变暗遮罩覆盖
+                    ValueListenableBuilder<double>(
+                      valueListenable: _inputBarTop,
+                      builder: (context, top, _) {
+                        if (_attachments.isEmpty) {
+                          return const SizedBox.shrink();
+                        }
+                        return Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: bottomPad + keyboardInset + 8 + top,
+                          height: 84,
+                          child: _AttachmentBar(
+                            attachments: _attachments,
+                            onDelete: (i) =>
+                                setState(() => _attachments.removeAt(i)),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ),
-              );
-            },
-            // RepaintBoundary：主页面（消息列表/玻璃模糊/输入栏）缓存为
-            // 静态纹理层——抽屉动画期间 Transform 直接操作缓存层，
-            // 不逐帧重绘内部（消息多时避免每帧绘制大量气泡与模糊导致卡顿）
-            child: RepaintBoundary(
-              child: Stack(
-                children: [
-                  // 主内容：列表/页眉/输入栏（静态，动画期间复用）
-                  mainContent,
-                  // 附件条：主界面内（随 Transform 移动），
-                  // 位置绑定输入栏容器顶边；被变暗遮罩覆盖
-                  ValueListenableBuilder<double>(
-                    valueListenable: _inputBarTop,
-                    builder: (context, top, _) {
-                      if (_attachments.isEmpty) {
-                        return const SizedBox.shrink();
-                      }
-                      return Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: bottomPad + keyboardInset + 8 + top,
-                        height: 84,
-                        child: _AttachmentBar(
-                          attachments: _attachments,
-                          onDelete: (i) =>
-                              setState(() => _attachments.removeAt(i)),
-                        ),
-                      );
-                    },
-                  ),
-                ],
               ),
             ),
-          ),
-          // ── 全局手势层：右滑打开 / 左滑关闭 ──
-          // 有附件时底部 160px 让给附件条+输入栏（其横向滚动不被抽屉手势抢占）；
-          // 无附件时恢复全屏右滑权限
-          // translucent：只接收水平拖拽，点击/滚动穿透到下层
-          Positioned(
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: _attachments.isEmpty ? 0 : 160,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onHorizontalDragStart: (d) {
-                _dragStart = d.localPosition;
-                _drawerController.stop();
-              },
-              onHorizontalDragUpdate: (d) {
-                // 滑动角度阈值：累计方向与水平夹角 > 30° 时忽略
-                //（斜向滑动不触发抽屉，避免误触）
-                final start = _dragStart;
-                if (start != null) {
-                  final offset = d.localPosition - start;
-                  final angleRatio =
-                      offset.dy.abs() /
-                      offset.dx.abs().clamp(1.0, double.infinity);
-                  if (angleRatio > _dragAngleThreshold) return;
-                }
-                // 拖动系数放大：更跟手
-                _drawerController.value =
-                    (_drawerController.value +
-                            d.delta.dx / (_drawerShift * 0.8))
-                        .clamp(0.0, 1.0);
-              },
-              onHorizontalDragEnd: (d) {
-                final start = _dragStart;
-                _dragStart = null;
-                // 角度死区：斜向拖动不触发开合，但仍收敛到就近端点
-                if (start != null) {
-                  final offset = d.localPosition - start;
-                  final angleRatio =
-                      offset.dy.abs() /
-                      offset.dx.abs().clamp(1.0, double.infinity);
-                  if (angleRatio > _dragAngleThreshold) {
-                    _settleDrawer();
-                    return;
+            // ── 全局手势层：右滑打开 / 左滑关闭 ──
+            // 有附件时底部 160px 让给附件条+输入栏（其横向滚动不被抽屉手势抢占）；
+            // 无附件时恢复全屏右滑权限
+            // translucent：只接收水平拖拽，点击/滚动穿透到下层
+            Positioned(
+              left: 0,
+              top: 0,
+              right: 0,
+              bottom: _attachments.isEmpty ? 0 : 160,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onHorizontalDragStart: (d) {
+                  _dragStart = d.localPosition;
+                  _drawerController.stop();
+                },
+                onHorizontalDragUpdate: (d) {
+                  // 滑动角度阈值：累计方向与水平夹角 > 30° 时忽略
+                  //（斜向滑动不触发抽屉，避免误触）
+                  final start = _dragStart;
+                  if (start != null) {
+                    final offset = d.localPosition - start;
+                    final angleRatio =
+                        offset.dy.abs() /
+                        offset.dx.abs().clamp(1.0, double.infinity);
+                    if (angleRatio > _dragAngleThreshold) return;
                   }
-                }
-                final v = d.primaryVelocity ?? 0;
-                if (v < 0) {
-                  // 左滑退出：轻扫（速度 < -300）或滑到 70% 以下即关闭
-                  _drawerController.animateTo(
-                    (v < -300 || _drawerController.value < 0.7) ? 0.0 : 1.0,
-                    curve: Curves.easeOutQuart,
-                  );
-                } else {
-                  // 右滑打开：轻扫（速度 > 300）或超过 30% 即打开
-                  _drawerController.animateTo(
-                    (v > 300 || _drawerController.value > 0.3) ? 1.0 : 0.0,
-                    curve: Curves.easeOutQuart,
-                  );
-                }
-              },
-              // 手势被抢占/系统取消（如拖动中列表滚动获胜、来电等）：
-              // 收敛到就近端点，避免抽屉停在中间
-              onHorizontalDragCancel: () {
-                _dragStart = null;
-                _settleDrawer();
-              },
+                  // 拖动系数放大：更跟手
+                  _drawerController.value =
+                      (_drawerController.value +
+                              d.delta.dx / (_drawerShift * 0.8))
+                          .clamp(0.0, 1.0);
+                },
+                onHorizontalDragEnd: (d) {
+                  final start = _dragStart;
+                  _dragStart = null;
+                  // 角度死区：斜向拖动不触发开合，但仍收敛到就近端点
+                  if (start != null) {
+                    final offset = d.localPosition - start;
+                    final angleRatio =
+                        offset.dy.abs() /
+                        offset.dx.abs().clamp(1.0, double.infinity);
+                    if (angleRatio > _dragAngleThreshold) {
+                      _settleDrawer();
+                      return;
+                    }
+                  }
+                  final v = d.primaryVelocity ?? 0;
+                  if (v < 0) {
+                    // 左滑退出：轻扫（速度 < -300）或滑到 70% 以下即关闭
+                    _drawerController.animateTo(
+                      (v < -300 || _drawerController.value < 0.7) ? 0.0 : 1.0,
+                      curve: Curves.easeOutQuart,
+                    );
+                  } else {
+                    // 右滑打开：轻扫（速度 > 300）或超过 30% 即打开
+                    _drawerController.animateTo(
+                      (v > 300 || _drawerController.value > 0.3) ? 1.0 : 0.0,
+                      curve: Curves.easeOutQuart,
+                    );
+                  }
+                },
+                // 手势被抢占/系统取消（如拖动中列表滚动获胜、来电等）：
+                // 收敛到就近端点，避免抽屉停在中间
+                onHorizontalDragCancel: () {
+                  _dragStart = null;
+                  _settleDrawer();
+                },
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -3939,6 +4287,10 @@ class _HomePageState extends State<HomePage>
   }
 
   /// 消息气泡（llama.cpp 风格：user 靠右、assistant 靠左，思考与回复分割）
+  /// _MessageItem 等子组件的公开入口（见 HomePageStateScope）
+  Widget buildMessageBubble(BuildContext context, Message m, int index) =>
+      _messageBubble(context, m, index);
+
   Widget _messageBubble(BuildContext context, Message m, int index) {
     final isUser = m.role == Role.user;
     final align = isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start;
@@ -4019,7 +4371,7 @@ class _HomePageState extends State<HomePage>
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
                     color: isUser
-                        ? kBrandColorLight
+                        ? kUserBubbleColor
                         : (m.error
                               ? Colors.red.withValues(alpha: 0.1)
                               : Theme.of(context).brightness == Brightness.dark
@@ -4173,6 +4525,20 @@ class _HomePageState extends State<HomePage>
                         pressedColor: Colors.red.withValues(alpha: 0.18),
                         onTap: () => _deleteMessage(index),
                       ),
+                      // 朗读（系统 TTS，通用设置开关控制显隐）：
+                      // 正在朗读的消息高亮、图标变停止
+                      if (!isUser && _general.ttsEnabled)
+                        _messageAction(
+                          context,
+                          icon: identical(_speakingMsg, m)
+                              ? Icons.stop_circle_outlined
+                              : Icons.volume_up_outlined,
+                          tooltip: identical(_speakingMsg, m) ? '停止朗读' : '朗读',
+                          color: identical(_speakingMsg, m)
+                              ? Theme.of(context).colorScheme.onSurface
+                              : null,
+                          onTap: () => _toggleSpeak(m),
+                        ),
                       // 输出气泡工具栏最右边：上下文占用圆环
                       if (!isUser) ...[
                         const SizedBox(width: 8),
@@ -4245,7 +4611,12 @@ class _HomePageState extends State<HomePage>
 
   /// 落库前同步各消息「当前分支」的锚点快照与后续链（分支尾随实际消息列表），
   /// 再写入本地存储。所有会话级改动统一走这里
+  /// 落盘合并定时器：高频调用（流式尾帧/连续编辑）只触发一次写盘
+  Timer? _persistTimer;
+  Conversation? _pendingPersist;
+
   Future<void> _persist(Conversation conv) async {
+    // 同步锚点快照（内存操作，必须立即）
     for (var i = 0; i < conv.messages.length; i++) {
       final m = conv.messages[i];
       final b = m.branches;
@@ -4255,13 +4626,21 @@ class _HomePageState extends State<HomePage>
         live.tail = conv.messages.sublist(i + 1);
       }
     }
-    try {
-      await _store?.save(conv);
-    } catch (_) {
-      // 存储失败（web localStorage 超限/磁盘满，含原图 base64 大消息）：
-      // 提示但不崩溃
-      _toast('存储空间不足，消息未能保存');
-    }
+    // 写盘防抖（800ms）：连续触发合并为一次——大对话 JSON 编码
+    // （isolate）+ 文件写入不再高频重复
+    _pendingPersist = conv;
+    _persistTimer?.cancel();
+    _persistTimer = Timer(const Duration(milliseconds: 800), () async {
+      final c = _pendingPersist;
+      _pendingPersist = null;
+      if (c == null) return;
+      try {
+        await _store?.save(c);
+      } catch (_) {
+        // 存储失败（磁盘满，含原图 base64 大消息）：提示但不崩溃
+        _toast('存储空间不足，消息未能保存');
+      }
+    });
   }
 
   /// 消息快照（分支锚点用）：复制内容/思考/错误/历史版本/图片/文件/工具记录，
@@ -4334,11 +4713,13 @@ class _HomePageState extends State<HomePage>
   void _branchMessage(
     int index,
     TextEditingController contentCtrl, {
+    // 分支拓扑变化在方法体内 setState 前自增（见 _renderEpoch 注释）
     List<MessageFilePart>? fileParts,
     List<ImagePart>? imageParts,
   }) {
     final conv = _currentConversation;
     if (conv == null || _isResponding) return;
+    _renderEpoch++;
     final msg = conv.messages[index];
     // 分支内容存为模型文本（模型收到的仍是替换前文本）。
     // 用户消息允许文字为空（仅附件场景）
@@ -4384,6 +4765,7 @@ class _HomePageState extends State<HomePage>
   void _regenerate(int index) {
     final conv = _currentConversation;
     if (conv == null || _isResponding) return;
+    _renderEpoch++; // 分支拓扑变化：其他消息的导航显示随之刷新
     // 工具轮次检测：被点的消息之前（含本身）存在带 toolCalls 的助手消息
     // → 从用户最后一次输入开始整段重新生成（重新执行 ReAct 工具流程，
     //   否则新请求缺少工具上下文，模型无法基于工具结果回答）
@@ -4441,6 +4823,7 @@ class _HomePageState extends State<HomePage>
   /// （含工具调用轮与后续回答），整段旧链作为分支保存到用户消息，
   /// 然后重新走完整生成流程（含 ReAct 工具调用）
   void _regenerateFromUser(Conversation conv, int userIdx) {
+    _renderEpoch++; // 分支拓扑变化（工具轮整段重生成挂到用户消息）
     // 分支挂在 LLM 输出上：找用户消息之后的第一条 assistant 消息
     // （工具调用轮的第一个气泡），而非用户消息本身
     var anchorIdx = -1;
@@ -4489,6 +4872,7 @@ class _HomePageState extends State<HomePage>
   void _switchBranch(int index, int delta) {
     final conv = _currentConversation;
     if (conv == null || _isResponding) return;
+    _renderEpoch++; // 其他消息的分支导航显示（< n/N >）随之变化
     final msg = conv.messages[index];
     final b = msg.branches;
     if (b == null || b.length < 2) return;
@@ -4715,13 +5099,14 @@ class _HomePageState extends State<HomePage>
   /// 避免列表项重建/移入屏幕时重复解码闪烁
   Widget _imageGrid(BuildContext context, List<ImagePart> images) {
     final count = images.length;
-    // 单图：限高显示（保持比例）；多图：正方形网格
+    // 单图：固定高度（解码前后布局稳定——占位转圈与图片同尺寸，
+    // 不会出现先小后大再裁剪的跳变动画）；多图：正方形网格
     if (count == 1) {
       return Padding(
         padding: const EdgeInsets.only(bottom: 6),
-        child: ConstrainedBox(
-          // 单图最高 240，宽度满；BoxFit.cover 裁剪填充
-          constraints: const BoxConstraints(maxHeight: 240),
+        child: SizedBox(
+          height: 240,
+          width: double.infinity,
           child: _cachedImageThumb(context, images.first),
         ),
       );
@@ -4751,23 +5136,61 @@ class _HomePageState extends State<HomePage>
       onTap: () => _showImageFullscreen(context, img),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        child: Image(
-          // 缩略图限宽 600 解码（内存与耗时大幅降低）
-          image: ResizeImage.resizeIfNeeded(
-            600,
-            null,
-            _imageProviderFor(img.dataUrl),
+        // 文件 provider：FileImage 解码在 Flutter 异步线程池（UI 线程
+        // 零阻塞），磁盘缓存命中后接近零成本——彻底替代 UI 线程同步
+        // base64Decode 的 MemoryImage 路径
+        child: FutureBuilder<FileImage>(
+          // future 缓存：同一张图的 Future 只创建一次（每次 build
+          // 新建 Future 会让 FutureBuilder 回到 pending → 占位/图片
+          // 交替闪烁——有图时动画奇怪的根源）
+          future: _thumbFutures.putIfAbsent(
+            img.displayUrl,
+            () => _fileImageFor(img.displayUrl),
           ),
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-          errorBuilder: (_, _, _) => Container(
-            color: Colors.black26,
-            alignment: Alignment.center,
-            child: const Icon(
-              Icons.broken_image_outlined,
-              color: Colors.white54,
-            ),
-          ),
+          builder: (context, snap) => snap.data == null
+              ? Container(
+                  color: Colors.black12,
+                  child: const Center(
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 1.5),
+                    ),
+                  ),
+                )
+              : Image(
+                  image: snap.data!,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  frameBuilder: (context, child, frame, wasSync) {
+                    if (frame == null && !wasSync) {
+                      return Container(
+                        color: Colors.black12,
+                        alignment: Alignment.center,
+                        child: const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 1.5),
+                        ),
+                      );
+                    }
+                    return wasSync
+                        ? child
+                        : AnimatedOpacity(
+                            opacity: 1,
+                            duration: const Duration(milliseconds: 120),
+                            child: child,
+                          );
+                  },
+                  errorBuilder: (_, _, _) => Container(
+                    color: Colors.black26,
+                    alignment: Alignment.center,
+                    child: const Icon(
+                      Icons.broken_image_outlined,
+                      color: Colors.white54,
+                    ),
+                  ),
+                ),
         ),
       ),
     );
@@ -4781,6 +5204,39 @@ class _HomePageState extends State<HomePage>
         builder: (_) => _ImageFullscreen(image: _imageProviderFor(img.dataUrl)),
       ),
     );
+  }
+
+  /// 缩略图 Future 实例缓存（防 FutureBuilder 重复 pending 闪烁）
+  static final Map<String, Future<FileImage>> _thumbFutures = {};
+
+  /// 图片磁盘缓存目录（thumb/ai 档 dataUrl → 临时小文件）：
+  /// FileImage 的解码在 Flutter 内部异步线程池执行，
+  /// UI 线程零阻塞（此前 MemoryImage 路径每次重建都在 UI 线程
+  /// 同步 base64Decode——多图消息滚动/流式时每帧 MB 级同步解码，
+  /// 是显示卡顿的根源）
+  static Directory? _imgDiskDir;
+  static final Map<String, FileImage> _fileProviderCache = {};
+
+  Future<FileImage> _fileImageFor(String dataUrl) async {
+    final hit = _fileProviderCache[dataUrl];
+    if (hit != null) return hit;
+    final dir = _imgDiskDir ??= () {
+      final d = Directory('${Directory.systemTemp.path}/llm_img_providers');
+      d.createSync(recursive: true);
+      return d;
+    }();
+    // 文件名 = dataUrl 的稳定 hash（同图同文件，天然去重）
+    final name = 'img_${dataUrl.hashCode.abs()}.jpg';
+    final f = File('${dir.path}/$name');
+    if (!f.existsSync()) {
+      // base64 解码 + 落盘在 isolate：UI 线程零卡顿
+      final bytes = await compute(_b64ToBytes, dataUrl);
+      await f.writeAsBytes(bytes, flush: true);
+    }
+    final img = FileImage(f);
+    if (_fileProviderCache.length > 60) _fileProviderCache.clear();
+    _fileProviderCache[dataUrl] = img;
+    return img;
   }
 
   /// 图片实例缓存：同一 dataUrl 复用同一 MemoryImage。
@@ -5009,9 +5465,10 @@ class _HomePageState extends State<HomePage>
                           label: '思考深度',
                           value: depthLabels[_thinkingDepth],
                           onTap: () {
-                            setState(
-                              () => _thinkingDepth = (_thinkingDepth + 1) % 4,
-                            );
+                            setState(() {
+                              _thinkingDepth = (_thinkingDepth + 1) % 4;
+                              _renderEpoch++;
+                            });
                             // 固化到存档：重启后保持
                             _store?.saveThinkingDepth(_thinkingDepth);
                           },
@@ -5280,6 +5737,8 @@ class _HomePageState extends State<HomePage>
                                           // 按需加载完整正文（列表里是
                                           // 元数据壳，冷启动不解析消息）
                                           _materialize(c);
+                                          // 切换会话：停止上一会的朗读
+                                          _stopSpeaking();
                                           _drawerController.animateTo(
                                             0,
                                             curve: Curves.easeOutQuart,
@@ -5620,10 +6079,15 @@ class _Attachment {
     required this.name,
     this.path,
     this.size,
+    this.loading = false,
   });
 
   final bool isImage;
   final String name;
+
+  /// 压缩中占位：选图后立即以占位卡片形式出现（与选中数量一致），
+  /// 压缩完成后替换为真实缩略图
+  final bool loading;
 
   /// 本地路径（web 上图片为 blob URL）
   final String? path;
@@ -5692,7 +6156,7 @@ class _AttachmentBar extends StatelessWidget {
               // 阴影需超出卡片边界，不裁剪
               clipBehavior: Clip.none,
               children: [
-                // 内容：图片缩略图 / 文件图标（悬浮阴影）
+                // 内容：图片缩略图 / 压缩占位 / 文件图标（悬浮阴影）
                 Container(
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(10),
@@ -5706,7 +6170,19 @@ class _AttachmentBar extends StatelessWidget {
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(10),
-                    child: att.isImage
+                    child: att.loading
+                        ? Container(
+                            color: Colors.black12,
+                            alignment: Alignment.center,
+                            child: const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                              ),
+                            ),
+                          )
+                        : att.isImage
                         ? _imageThumb(context, att)
                         : _fileIcon(context, att),
                   ),
@@ -5741,9 +6217,52 @@ class _AttachmentBar extends StatelessWidget {
   Widget _imageThumb(BuildContext context, _Attachment att) {
     final path = att.path;
     if (path == null) return const SizedBox.shrink();
-    return kIsWeb
-        ? Image.network(path, fit: BoxFit.cover)
-        : Image.file(File(path), fit: BoxFit.cover);
+    if (kIsWeb) {
+      return Image.network(path, fit: BoxFit.cover);
+    }
+    // ResizeImage 限宽 400 解码：附件条格子只有 68×68，
+    // 全尺寸解码会把 UI 线程与 GPU 内存同时打爆。
+    // frameBuilder：解码未完成（frame==null）显示灰底转圈占位，
+    // 完成后淡入图片——不再出现空白格子
+    return Image(
+      image: ResizeImage(
+        FileImage(File(path)),
+        width: 400,
+        allowUpscaling: false,
+      ),
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      frameBuilder: (context, child, frame, wasSync) {
+        if (frame == null && !wasSync) {
+          // 解码中：灰色占位 + 小转圈
+          return Container(
+            color: Colors.black12,
+            alignment: Alignment.center,
+            child: const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
+          );
+        }
+        return wasSync
+            ? child
+            : AnimatedOpacity(
+                opacity: 1,
+                duration: const Duration(milliseconds: 150),
+                child: child,
+              );
+      },
+      errorBuilder: (_, _, _) => Container(
+        color: Colors.black26,
+        alignment: Alignment.center,
+        child: Icon(
+          Icons.broken_image_outlined,
+          size: 18,
+          color: Colors.white54,
+        ),
+      ),
+    );
   }
 
   /// 文件卡片（llama.cpp 风格横排）：文件图标 + 文件名 + 大小两行
@@ -5817,6 +6336,7 @@ class _GlassInputBar extends StatefulWidget {
     required this.modelSupportsTools,
     required this.modelSupportsThinking,
     required this.hasAttachments,
+    required this.attachmentsAllLoading,
   });
 
   /// 加号面板：选择图片 / 文件（由 HomePage 统一处理附件）
@@ -5881,6 +6401,9 @@ class _GlassInputBar extends StatefulWidget {
 
   /// 是否有附件（有附件时即使无文字也可发送）
   final bool hasAttachments;
+
+  /// 附件是否全部仍在压缩中（占位状态：发送按钮禁用）
+  final bool attachmentsAllLoading;
 
   @override
   State<_GlassInputBar> createState() => _GlassInputBarState();
@@ -6153,7 +6676,9 @@ class _GlassInputBarState extends State<_GlassInputBar> {
   }
 
   /// 发送可用：有文字或有附件（可单独发送文件，同 llama.cpp）
-  bool get _canSend => _controller.text.isNotEmpty || widget.hasAttachments;
+  bool get _canSend =>
+      _controller.text.isNotEmpty ||
+      (widget.hasAttachments && !widget.attachmentsAllLoading);
 
   /// 加号按钮：弹出底部面板（主界面变暗，面板占屏幕 2/5，
   /// 圆角、顶部居中小横条、下拉关闭、内部为空）
@@ -6608,7 +7133,7 @@ class _VoicePulseIconState extends State<_VoicePulseIcon>
       child: Icon(
         Icons.keyboard_voice,
         size: 18,
-        color: Theme.of(context).colorScheme.primary,
+        color: Theme.of(context).colorScheme.onSurface,
       ),
     );
   }
@@ -6804,6 +7329,13 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                         onNotification: _onScrollNotification,
                         child: SingleChildScrollView(
                           controller: _scroll,
+                          // 永远接受滚动手势：默认 Clamping 在边缘会拒绝
+                          // 新手势（竞技场输给外层聊天列表 → 到底后再拖
+                          // 会滚动整个屏幕）；AlwaysScrollable 让内层始终
+                          // 赢得手势，到底表现为边缘效果而非链到父级
+                          physics: const AlwaysScrollableScrollPhysics(
+                            parent: ClampingScrollPhysics(),
+                          ),
                           child: SelectableText(
                             widget.thinking,
                             style: theme.textTheme.bodySmall?.copyWith(
@@ -6823,6 +7355,106 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
       ),
     );
   }
+}
+
+/// 消息列表项包装：构造参数（消息对象引用 + 索引）不变时跳过
+/// 子树 rebuild——流式期间 HomePage 每 33ms setState，静态消息项
+/// 的参数完全相同（Message 是可变对象、引用稳定），子树零重建；
+/// 正在流式的那条消息 content 在变，但 Flutter 只 rebuild 它一个
+class _MessageItem extends StatefulWidget {
+  const _MessageItem({
+    required this.message,
+    required this.index,
+    this.editing = false,
+    this.branchEditing = false,
+    this.streaming = false,
+    this.epoch = 0,
+  });
+
+  final Message message;
+  final int index;
+
+  /// 编辑态（内联编辑器替换气泡）——必须计入签名：
+  /// 进入/退出编辑时内容长度不变，漏掉会复用旧气泡导致编辑器不出现
+  final bool editing;
+
+  /// 分支编辑态（同上）
+  final bool branchEditing;
+
+  /// 正在流式接收（影响打字点/工具栏显隐判定）
+  final bool streaming;
+
+  /// 渲染纪元（全局状态版本号）
+  final int epoch;
+
+  @override
+  State<_MessageItem> createState() => _MessageItemState();
+}
+
+class _MessageItemState extends State<_MessageItem> {
+  /// 子树缓存：静态消息项（内容签名未变）直接复用上一帧 Widget，
+  /// 跳过 build——流式期间 HomePage 每 33ms setState，只有正在
+  /// 生成的那条消息签名变化触发真实 rebuild
+  Widget? _cached;
+  int _sig = -1;
+
+  /// O(1) 内容签名：流式 append-only，长度即可感知变化；
+  /// 编辑/分支切换也伴随长度或 viewPos 变化。误判后果
+  /// 只是多/少 build 一帧（视觉无损）。
+  /// 工具卡片：ReAct 轮次中 content 不变而 toolCalls 增长/回填
+  /// resultCount——必须计入（漏掉时工具分割卡不渲染）
+  int _signature() =>
+      widget.message.content.length * 31 +
+      (widget.message.thinking?.length ?? 0) * 17 +
+      widget.message.viewPos * 7 +
+      widget.index +
+      (widget.message.branches?.length ?? 0) * 3 +
+      (widget.message.toolCalls?.length ?? 0) * 101 +
+      (widget.editing ? 9973 : 0) +
+      (widget.branchEditing ? 9967 : 0) +
+      (widget.message.truncated ? 9949 : 0) +
+      (widget.message.error ? 9931 : 0) +
+      (widget.streaming ? 9923 : 0) +
+      (widget.message.imageParts?.length ?? 0) * 9907 +
+      (widget.message.fileParts?.length ?? 0) * 9901 +
+      (widget.message.toolCalls?.fold<int>(
+            0,
+            (a, t) => a * 31 + (t.resultCount ?? -1000),
+          ) ??
+          0) +
+      widget.epoch * 1000003;
+
+  @override
+  void didUpdateWidget(_MessageItem oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_sig >= 0 && _sig != _signature()) {
+      _cached = null;
+    }
+    _sig = _signature();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final home = _HomePageScope.of(context);
+    return _cached ??= Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: home.buildMessageBubble(context, widget.message, widget.index),
+    );
+  }
+}
+
+/// HomePage State 暴露作用域：让 _MessageItem 等子组件访问其方法
+class _HomePageScope extends InheritedWidget {
+  const _HomePageScope({super.key, required this.state, required super.child});
+
+  final _HomePageState state;
+
+  static _HomePageState of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_HomePageScope>()!.state;
+
+  @override
+  bool updateShouldNotify(_HomePageScope oldWidget) =>
+      !identical(oldWidget.state, state);
 }
 
 /// 页眉玻璃胶囊按钮：按压缩放反馈 + 自定义水波纹（扩散圆）。
@@ -8006,6 +8638,78 @@ const List<PromptTemplate> kBuiltinPromptTemplates = [
         '再提供支持；不评判、不建议堆砌，必要时温和地提出视角。',
   ),
 ];
+
+/// 原图字节 → 压缩 JPEG 字节（isolate 内执行）：解码 + 缩放 +
+/// 重编码全在后台，主线程零卡顿
+/// 图片压缩（isolate 调用）：原生编解码器优先（Android BitmapFactory
+/// + libjpeg，C 实现，快 10-50 倍——截屏等大型 PNG 用纯 Dart image 包
+/// 解码动辄数秒甚至失败，是「有图无法上传」的主因），原生失败再回退
+/// 纯 Dart。注意：flutter_image_compress 在 isolate 中不可直接用
+/// （平台通道），因此此函数跑在主 isolate 的 await 链上——原生压缩
+/// 本身在 C 线程执行，不阻塞 UI
+Future<Uint8List> compressSingleImageNative(
+  Uint8List bytes, {
+  required double maxSide,
+  required int quality,
+}) async {
+  try {
+    final result = await FlutterImageCompress.compressWithList(
+      bytes,
+      minWidth: maxSide.round(),
+      minHeight: maxSide.round(),
+      quality: quality,
+      format: CompressFormat.jpeg,
+    );
+    if (result.isNotEmpty) return result;
+  } catch (_) {}
+  // 回退：纯 Dart（isolate 里执行）
+  return compute(_compressSingleImageDart, {
+    'bytes': bytes,
+    'maxSide': maxSide,
+    'quality': quality,
+  });
+}
+
+Uint8List _compressSingleImageDart(Map<String, dynamic> args) {
+  final bytes = args['bytes'] as Uint8List;
+  final maxSide = (args['maxSide'] as num).toDouble();
+  final quality = args['quality'] as int;
+  final decoded = im.decodeImage(bytes);
+  if (decoded == null) return bytes;
+  var img = decoded;
+  if (img.width > maxSide || img.height > maxSide) {
+    img = im.copyResize(
+      img,
+      width: img.width >= img.height ? maxSide.round() : null,
+      height: img.height > img.width ? maxSide.round() : null,
+      interpolation: im.Interpolation.average,
+    );
+  }
+  return Uint8List.fromList(im.encodeJpg(img, quality: quality));
+}
+
+/// dataUrl → 原始字节（isolate 内执行）
+Uint8List _b64ToBytes(String dataUrl) {
+  final comma = dataUrl.indexOf(',');
+  return base64Decode(comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl);
+}
+
+/// 内存音频源（API 返回的 MP3 字节直接播放，不落盘）
+class _BytesAudioSource extends StreamAudioSource {
+  _BytesAudioSource(this._bytes);
+
+  final Uint8List _bytes;
+
+  @override
+  Future<StreamAudioResponse> request([int? start, int? end]) async =>
+      StreamAudioResponse(
+        sourceLength: _bytes.length,
+        contentLength: (end ?? _bytes.length) - (start ?? 0),
+        offset: start ?? 0,
+        stream: Stream.value(_bytes.sublist(start ?? 0, end ?? _bytes.length)),
+        contentType: 'audio/mpeg',
+      );
+}
 
 /// 上下文占用圆环画笔：底环 + 进度弧（从 12 点方向顺时针）
 class _ContextRingPainter extends CustomPainter {

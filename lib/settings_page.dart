@@ -129,6 +129,80 @@ Widget _projectInput({
   );
 }
 
+Widget _switchTile(
+  BuildContext context, {
+  required IconData icon,
+  required String title,
+  required String subtitle,
+  required bool value,
+  required ValueChanged<bool> onChanged,
+  bool enabled = true,
+}) {
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  // 药丸型开关（灰白体系，深色模式适配）：浅灰/深灰底 + 细外框 +
+  // 深灰/浅灰圆；开启/关闭同款（显式 trackOutlineColor 覆盖 M3
+  // 开启态透明描边），状态由圆钮位置区分
+  final thumb = dark ? Colors.grey.shade300 : Colors.grey.shade800;
+  final track = dark ? Colors.grey.shade700 : Colors.grey.shade300;
+  final outline = Colors.grey.shade500;
+  return Opacity(
+    // 受总开关控制（如内置工具总关时明细开关置灰）
+    opacity: enabled ? 1 : 0.4,
+    child: Material(
+      color: _buttonColor(context),
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: enabled ? () => onChanged(!value) : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 20,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Switch(
+                value: value,
+                onChanged: enabled ? onChanged : null,
+                activeThumbColor: thumb,
+                inactiveThumbColor: thumb,
+                trackColor: WidgetStatePropertyAll(track),
+                trackOutlineColor: WidgetStatePropertyAll(outline),
+                trackOutlineWidth: const WidgetStatePropertyAll(1.0),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 /// 项目风格全宽大按钮（灰色半透明 + 圆角 14 + 水波纹，与面板大按钮一致）
 Widget _primaryButton({
   required BuildContext context,
@@ -345,6 +419,18 @@ class _SettingsPageState extends State<SettingsPage> {
     if (mounted) setState(() {});
   }
 
+  /// 进入语音朗读设置页
+  void _openTts() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _TtsSettingsPage(
+          settings: widget.generalSettings,
+          onChanged: widget.onGeneralSettingsChanged,
+        ),
+      ),
+    );
+  }
+
   /// 进入归档对话管理页：数据由 HomePage 构造传入（内存缓存），
   /// 与其他设置子页一致——点击立即 push，滑入即有完整内容
   void _openArchived() {
@@ -490,6 +576,28 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             onTap: _openMcp,
+          ),
+          const SizedBox(height: 12),
+          // 语音朗读（TTS）：独立设置页
+          _projectTile(
+            context: context,
+            leading: Icon(
+              Icons.volume_up_outlined,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+            title: Text(
+              '语音朗读',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              '朗读回复（在线合成 / 系统引擎）',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            onTap: _openTts,
           ),
           const SizedBox(height: 12),
           // 归档对话管理：查看、恢复或永久删除归档的对话
@@ -3129,6 +3237,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           // ── 输入 ──
           _sectionLabel('输入'),
           _switchTile(
+            context,
             icon: Icons.content_paste_go,
             title: '粘贴长文本转为文件',
             subtitle: '超过阈值的粘贴文本自动转为 .txt 附件',
@@ -3162,6 +3271,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           const SizedBox(height: 12),
           // 将 PDF 解析为图像：发送时渲染每页为图片（多模态模型可查看）
           _switchTile(
+            context,
             icon: Icons.picture_as_pdf_outlined,
             title: '将 PDF 解析为图像',
             subtitle: 'PDF 附件渲染为图片发送，模型可直接查看内容',
@@ -3264,6 +3374,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           // ── 渲染 ──
           _sectionLabel('渲染'),
           _switchTile(
+            context,
             icon: Icons.article_outlined,
             title: 'Markdown 渲染',
             subtitle: '消息正文按 Markdown 格式渲染',
@@ -3273,6 +3384,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           const SizedBox(height: 12),
           // 上下文占用百分比（默认只显示圆环；开启后百分比显示在圆环右侧）
           _switchTile(
+            context,
             icon: Icons.donut_large,
             title: '上下文占用百分比',
             subtitle: '在输出气泡的上下文占用圆环右侧显示百分比',
@@ -3281,6 +3393,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           ),
           const SizedBox(height: 12),
           _switchTile(
+            context,
             icon: Icons.functions,
             title: 'LaTeX 渲染',
             subtitle: '识别 \$...\$ 与 \$\$...\$\$ 数学公式',
@@ -3289,6 +3402,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           ),
           const SizedBox(height: 12),
           _switchTile(
+            context,
             icon: Icons.account_tree_outlined,
             title: 'Mermaid 图表',
             subtitle: '渲染 mermaid 代码块为流程图',
@@ -3297,6 +3411,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           ),
           const SizedBox(height: 12),
           _switchTile(
+            context,
             icon: Icons.preview_outlined,
             title: 'Artifacts 预览',
             subtitle: '自动预览 HTML/SVG 代码块的生成物',
@@ -3308,6 +3423,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           // ── 内置工具 ──
           _sectionLabel('内置工具'),
           _switchTile(
+            context,
             icon: Icons.build_outlined,
             title: '内置工具',
             subtitle: '启用后模型可调用以下工具（可单独开关）',
@@ -3317,6 +3433,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           ),
           const SizedBox(height: 12),
           _switchTile(
+            context,
             icon: Icons.schedule,
             title: '获取当前时间',
             subtitle: 'builtin__get_current_time',
@@ -3326,6 +3443,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           ),
           const SizedBox(height: 12),
           _switchTile(
+            context,
             icon: Icons.location_on_outlined,
             title: '获取地理位置',
             subtitle: 'builtin__get_location（需定位权限）',
@@ -3335,6 +3453,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           ),
           const SizedBox(height: 12),
           _switchTile(
+            context,
             icon: Icons.travel_explore,
             title: '联网搜索',
             subtitle: 'builtin__web_search（DeepSeek 原生搜索）',
@@ -3389,6 +3508,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           // ── 归档 ──
           _sectionLabel('归档'),
           _switchTile(
+            context,
             icon: Icons.archive_outlined,
             title: '自动归档',
             subtitle: '未活跃超过设定天数的对话自动归档（锁定的除外）',
@@ -3420,6 +3540,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           ),
           const SizedBox(height: 12),
           _switchTile(
+            context,
             icon: Icons.delete_sweep_outlined,
             title: '自动删除归档',
             subtitle: '归档超过设定天数的对话自动永久删除',
@@ -3465,78 +3586,6 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
   }
 
   /// 项目风格开关行：灰色卡片 + 图标 + 标题/副标题 + trailing Switch
-  Widget _switchTile({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required bool value,
-    required ValueChanged<bool> onChanged,
-    bool enabled = true,
-  }) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    // 药丸型开关（灰白体系，深色模式适配）：浅灰/深灰底 + 细外框 +
-    // 深灰/浅灰圆；开启/关闭同款（显式 trackOutlineColor 覆盖 M3
-    // 开启态透明描边），状态由圆钮位置区分
-    final thumb = dark ? Colors.grey.shade300 : Colors.grey.shade800;
-    final track = dark ? Colors.grey.shade700 : Colors.grey.shade300;
-    final outline = Colors.grey.shade500;
-    return Opacity(
-      // 受总开关控制（如内置工具总关时明细开关置灰）
-      opacity: enabled ? 1 : 0.4,
-      child: Material(
-        color: _buttonColor(context),
-        borderRadius: BorderRadius.circular(14),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(14),
-          onTap: enabled ? () => onChanged(!value) : null,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            child: Row(
-              children: [
-                Icon(
-                  icon,
-                  size: 20,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Switch(
-                  value: value,
-                  onChanged: enabled ? onChanged : null,
-                  activeThumbColor: thumb,
-                  inactiveThumbColor: thumb,
-                  trackColor: WidgetStatePropertyAll(track),
-                  trackOutlineColor: WidgetStatePropertyAll(outline),
-                  trackOutlineWidth: const WidgetStatePropertyAll(1.0),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
   /// 标题策略单选行：选中态 = 中性强调色浅底 + 实心勾选图标。
   /// [trailing] 行尾附加控件（AI 行的展开箭头，仅视觉，点击走行级 onTapUp）；
@@ -4029,6 +4078,180 @@ class _ArchivedCardState extends State<_ArchivedCard>
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// ── 语音朗读（TTS）独立设置页 ──
+class _TtsSettingsPage extends StatefulWidget {
+  const _TtsSettingsPage({required this.settings, required this.onChanged});
+
+  final GeneralSettings settings;
+  final ValueChanged<GeneralSettings> onChanged;
+
+  @override
+  State<_TtsSettingsPage> createState() => _TtsSettingsPageState();
+}
+
+class _TtsSettingsPageState extends State<_TtsSettingsPage> {
+  late GeneralSettings _s = widget.settings;
+  late final TextEditingController _ttsUrlCtrl = TextEditingController(
+    text: _s.ttsBaseUrl,
+  );
+  late final TextEditingController _ttsKeyCtrl = TextEditingController(
+    text: _s.ttsApiKey,
+  );
+  late final TextEditingController _ttsModelCtrl = TextEditingController(
+    text: _s.ttsModel,
+  );
+  late final TextEditingController _ttsVoiceCtrl = TextEditingController(
+    text: _s.ttsVoice,
+  );
+
+  void _update(GeneralSettings Function(GeneralSettings) mutator) {
+    setState(() => _s = mutator(_s));
+    widget.onChanged(_s);
+  }
+
+  @override
+  void dispose() {
+    _ttsUrlCtrl.dispose();
+    _ttsKeyCtrl.dispose();
+    _ttsModelCtrl.dispose();
+    _ttsVoiceCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _projectScaffold(
+      context: context,
+      title: '语音朗读',
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _switchTile(
+            context,
+            icon: Icons.volume_up_outlined,
+            title: '朗读消息',
+            subtitle: '助手消息工具栏显示朗读按钮',
+            value: _s.ttsEnabled,
+            onChanged: (v) => _update((s) => s.copyWith(ttsEnabled: v)),
+          ),
+          const SizedBox(height: 12),
+          _switchTile(
+            context,
+            icon: Icons.cloud_outlined,
+            title: '在线语音 API',
+            subtitle:
+                '伪流式分段合成（OpenAI 兼容 /audio/speech）；'
+                '关闭则用系统语音引擎',
+            value: _s.ttsUseApi,
+            enabled: _s.ttsEnabled,
+            onChanged: (v) => _update((s) => s.copyWith(ttsUseApi: v)),
+          ),
+          if (_s.ttsEnabled && _s.ttsUseApi) ...[
+            const SizedBox(height: 12),
+            Material(
+              color: _buttonColor(context),
+              borderRadius: BorderRadius.circular(14),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  children: [
+                    _projectInput(
+                      context: context,
+                      controller: _ttsUrlCtrl,
+                      label: '接口地址',
+                      hint: 'https://api.siliconflow.cn/v1/audio/speech',
+                      onChanged: (v) =>
+                          _update((s) => s.copyWith(ttsBaseUrl: v)),
+                    ),
+                    const SizedBox(height: 12),
+                    _projectInput(
+                      context: context,
+                      controller: _ttsKeyCtrl,
+                      label: 'API Key',
+                      hint: 'sk-...',
+                      onChanged: (v) =>
+                          _update((s) => s.copyWith(ttsApiKey: v)),
+                    ),
+                    const SizedBox(height: 12),
+                    _projectInput(
+                      context: context,
+                      controller: _ttsModelCtrl,
+                      label: '模型',
+                      hint: 'FunAudioLLM/CosyVoice2-0.5B',
+                      onChanged: (v) => _update((s) => s.copyWith(ttsModel: v)),
+                    ),
+                    const SizedBox(height: 12),
+                    _projectInput(
+                      context: context,
+                      controller: _ttsVoiceCtrl,
+                      label: '音色',
+                      hint: 'alex / anna / bella …（取决于服务）',
+                      onChanged: (v) => _update((s) => s.copyWith(ttsVoice: v)),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Text(
+                          '语速',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                        Expanded(
+                          child: SliderTheme(
+                            data: SliderThemeData(
+                              trackHeight: 10,
+                              activeTrackColor: Colors.grey.shade700,
+                              inactiveTrackColor: Colors.grey.withValues(
+                                alpha: 0.25,
+                              ),
+                              thumbColor: Colors.white,
+                              thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 9,
+                              ),
+                              overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 0,
+                              ),
+                              tickMarkShape: SliderTickMarkShape.noTickMark,
+                            ),
+                            child: Slider(
+                              value: _s.ttsSpeed,
+                              min: 0.5,
+                              max: 2.0,
+                              divisions: 6,
+                              label: '${_s.ttsSpeed.toStringAsFixed(2)}x',
+                              onChanged: (v) =>
+                                  _update((s) => s.copyWith(ttsSpeed: v)),
+                            ),
+                          ),
+                        ),
+                        Text(
+                          '${_s.ttsSpeed.toStringAsFixed(2)}x',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 24),
+        ],
       ),
     );
   }
