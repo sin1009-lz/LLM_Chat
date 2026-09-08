@@ -11,6 +11,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:geolocator/geolocator.dart';
@@ -105,6 +106,23 @@ void main() {
   PaintingBinding.instance.imageCache
     ..maximumSize = 100
     ..maximumSizeBytes = 48 << 20;
+  // 后台接收回复：前台服务（生成期间启动保活——系统冻结后台进程
+  // 是切后台后流式中断的根源；服务挂常驻通知"正在接收回复"）
+  FlutterForegroundTask.init(
+    androidNotificationOptions: AndroidNotificationOptions(
+      channelId: 'llm_chat_stream',
+      channelName: '后台接收回复',
+      channelDescription: '生成回复期间保持运行',
+    ),
+    iosNotificationOptions: const IOSNotificationOptions(),
+    foregroundTaskOptions: ForegroundTaskOptions(
+      eventAction: ForegroundTaskEventAction.nothing(),
+      allowWakeLock: true,
+      allowWifiLock: true,
+      autoRunOnBoot: false,
+      autoRunOnMyPackageReplaced: false,
+    ),
+  );
   runApp(const LlmUiApp());
 }
 
@@ -744,11 +762,11 @@ class _HomePageState extends State<HomePage>
   String? get _prompt => _currentConversation?.systemPrompt;
 
   /// 内联编辑中的消息索引（null = 无；llama-ui 风格原地编辑）
-  int? _editingIndex;
+  Message? _editingMsg;
 
   /// 分支编辑中的用户消息索引（null = 无）。
   /// 与编辑共用内联编辑器，但确认后截断该消息之后的内容并重新生成（开启分支对话）
-  int? _branchIndex;
+  Message? _branchMsg;
 
   /// 是否在编辑系统提示词（内联，列表顶部）
   bool _editingSystem = false;
@@ -1704,6 +1722,7 @@ class _HomePageState extends State<HomePage>
       conv.updatedAt = DateTime.now();
       _isResponding = true;
     });
+    _startStreamService();
     _scrollToBottom();
 
     // 模型名：跟随页眉下拉选择，直接发给服务器（测试服务为局域网模型）
@@ -1780,6 +1799,11 @@ class _HomePageState extends State<HomePage>
   String _streamBufContent = '';
   Timer? _streamFlushTimer;
   Message? _streamMsg;
+
+  /// 流式帧通知：流式期间每 33ms 只 tick 一次，消息项各自比对签名
+  /// 决定是否自刷新——HomePage 整树 build 不再逐帧执行
+  ///（抽屉/页眉/输入栏等全部静态部分的重建是流式掉帧的大头）
+  final ValueNotifier<int> _streamTick = ValueNotifier(0);
   int _lastStreamFlushMs = 0;
 
   /// 累积流式 delta（[acc] 为 ReAct 本轮的 content 缓冲，需即时同步）
@@ -1819,10 +1843,11 @@ class _HomePageState extends State<HomePage>
     _streamBufThinking = '';
     _streamBufContent = '';
     if (t.isEmpty && c.isEmpty) return;
-    setState(() {
-      if (t.isNotEmpty) msg.thinking = (msg.thinking ?? '') + t;
-      if (c.isNotEmpty) msg.content += c;
-    });
+    // 直接改消息字段 + tick：各消息项监听 tick 比对签名自刷新，
+    // 只有正在流式的那条重建（HomePage 零重建）
+    if (t.isNotEmpty) msg.thinking = (msg.thinking ?? '') + t;
+    if (c.isNotEmpty) msg.content += c;
+    _streamTick.value++;
   }
 
   /// 流式结束/停止/出错前调用：flush 残余 buffer（保证最后几个 token 不丢）
@@ -1865,11 +1890,12 @@ class _HomePageState extends State<HomePage>
   Future<void> _deleteMessage(int index) async {
     final conv = _currentConversation;
     if (conv == null) return;
+    final victim = conv.messages[index];
     setState(() {
       conv.messages.removeAt(index);
-      // 该条正在编辑/分支编辑则一并退出
-      if (_editingIndex == index) _editingIndex = null;
-      if (_branchIndex == index) _branchIndex = null;
+      // 该条正在编辑/分支编辑则一并退出（identity 判定）
+      if (identical(_editingMsg, victim)) _editingMsg = null;
+      if (identical(_branchMsg, victim)) _branchMsg = null;
     });
     await _persist(conv);
   }
@@ -1891,14 +1917,14 @@ class _HomePageState extends State<HomePage>
         _conversations.insert(0, conv);
         _currentId = conv.id;
         _editingSystem = true;
-        _editingIndex = null;
+        _editingMsg = null;
       });
       _persist(conv);
       return;
     }
     setState(() {
       _editingSystem = true;
-      _editingIndex = null;
+      _editingMsg = null;
     });
   }
 
@@ -2581,6 +2607,7 @@ class _HomePageState extends State<HomePage>
       await _persist(conv);
       return;
     }
+    _stopStreamService();
     setState(() {
       _isResponding = false;
       conv.updatedAt = DateTime.now();
@@ -2648,6 +2675,7 @@ class _HomePageState extends State<HomePage>
     Object e,
   ) async {
     _streamSub = null;
+    _stopStreamService();
     if (!mounted) return;
     setState(() {
       _isResponding = false;
@@ -2661,8 +2689,25 @@ class _HomePageState extends State<HomePage>
   /// 停止流式（保留已收部分）。若停止时助手消息完全为空
   /// （还在思考/工具调用阶段，content 与 thinking 都没收到），删除该空气泡。
   /// ReAct 循环用 await-for 无法 cancel，置标志位由循环自行中断清理
+  /// 生成期间前台服务：常驻通知保活（后台/息屏流式不断）
+  Future<void> _startStreamService() async {
+    if (await FlutterForegroundTask.isRunningService) return;
+    await FlutterForegroundTask.startService(
+      notificationTitle: 'LLM_Chat',
+      notificationText: '正在接收回复…',
+      serviceTypes: [ForegroundServiceTypes.dataSync],
+    );
+  }
+
+  Future<void> _stopStreamService() async {
+    if (await FlutterForegroundTask.isRunningService) {
+      await FlutterForegroundTask.stopService();
+    }
+  }
+
   void _onStop() {
     _streamSub?.cancel();
+    _stopStreamService();
     if (_isReactRunning) {
       _stopRequested = true;
       return;
@@ -3579,12 +3624,17 @@ class _HomePageState extends State<HomePage>
   }
 
   /// 按需加载会话完整正文：打开会话时把列表中的元数据壳替换为
-  /// 完整对象（文件读取 + 解析一次；已在内存则跳过）
-  void _materialize(Conversation shell) {
-    if (shell.loaded) return;
+  /// 完整对象。isolate 读文件 + 解析（带图会话几 MB 的 JSON 在
+  /// 主线程同步解析卡顿数百毫秒——切对话卡顿的根源）；
+  /// 防重入：同壳只加载一次
+  Conversation? _materializing;
+  Future<void> _materialize(Conversation shell) async {
+    if (shell.loaded || identical(_materializing, shell)) return;
     final store = _store;
     if (store == null) return;
-    final full = store.loadConversation(shell.id);
+    _materializing = shell;
+    final full = await store.loadConversationAsync(shell.id);
+    _materializing = null;
     if (full == null) return;
     final i = _conversations.indexWhere((c) => c.id == shell.id);
     if (i >= 0 && mounted) {
@@ -3626,6 +3676,7 @@ class _HomePageState extends State<HomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _streamTick.dispose();
     _tts?.stop();
     _streamSub?.cancel();
     _maintainTimer?.cancel();
@@ -3712,8 +3763,8 @@ class _HomePageState extends State<HomePage>
                 return _MessageItem(
                   message: m,
                   index: msgIndex,
-                  editing: _editingIndex == msgIndex,
-                  branchEditing: _branchIndex == msgIndex,
+                  editing: identical(_editingMsg, m),
+                  branchEditing: identical(_branchMsg, m),
                   streaming:
                       _isResponding &&
                       m.role != Role.user &&
@@ -4331,13 +4382,13 @@ class _HomePageState extends State<HomePage>
         : (navOwner?.branches?.length ?? 0);
     final navPos = hasOwnNav ? m.viewPos : (navOwner?.viewPos ?? 0);
     // 内联编辑模式（llama-ui 风格：原地变 textarea + Cancel/Save）
-    if (_editingIndex == index) {
+    if (identical(_editingMsg, m)) {
       return _InlineMessageEditor(
         message: m,
         index: index,
         isUser: isUser,
         replaceRules: _replaceRules,
-        branchMode: _branchIndex == index,
+        branchMode: identical(_branchMsg, m),
         onCancel: _cancelEditing,
         onSave: _saveEditedMessage,
         onBranch: _branchMessage,
@@ -4412,6 +4463,10 @@ class _HomePageState extends State<HomePage>
                       // 已完成请求的中间轮（content 空）不显示占位
                       m.content.isEmpty && isStreamingTarget
                           ? _typingDots(context)
+                          // 纯图片/附件消息：无正文不渲染空段落
+                          //（空串 markdown 的空白块 = 气泡多余间距）
+                          : m.content.isEmpty
+                          ? const SizedBox.shrink()
                           : _general.markdownEnabled
                           ? MarkdownView(
                               // 文字替换：显示层应用规则（模型文本 → 显示文本），
@@ -4494,8 +4549,8 @@ class _HomePageState extends State<HomePage>
                         icon: Icons.edit_outlined,
                         tooltip: '编辑',
                         onTap: () => setState(() {
-                          _editingIndex = index;
-                          _branchIndex = null; // 普通编辑会退出分支模式
+                          _editingMsg = m;
+                          _branchMsg = null; // 普通编辑会退出分支模式
                         }),
                       ),
                       // 用户消息可开启分支对话（确认后截断并重新生成）
@@ -4505,8 +4560,8 @@ class _HomePageState extends State<HomePage>
                           icon: Icons.call_split,
                           tooltip: '分支',
                           onTap: () => setState(() {
-                            _branchIndex = index;
-                            _editingIndex = index;
+                            _branchMsg = m;
+                            _editingMsg = m;
                           }),
                         ),
                       // 仅助手消息可重新生成
@@ -4692,7 +4747,7 @@ class _HomePageState extends State<HomePage>
         }
       }
       msg.error = false;
-      _editingIndex = null;
+      _editingMsg = null;
     });
     await _persist(conv);
   }
@@ -4700,8 +4755,8 @@ class _HomePageState extends State<HomePage>
   /// 退出内联编辑/分支编辑（Cancel 按钮）
   void _cancelEditing() {
     setState(() {
-      _editingIndex = null;
-      _branchIndex = null;
+      _editingMsg = null;
+      _branchMsg = null;
     });
   }
 
@@ -4751,8 +4806,8 @@ class _HomePageState extends State<HomePage>
         MessageBranch(_snapshot(msg), <Message>[]),
       ];
       msg.viewPos = msg.branches!.length - 1;
-      _editingIndex = null;
-      _branchIndex = null;
+      _editingMsg = null;
+      _branchMsg = null;
       // 截断该消息之后的内容（新分支的后续将由新回复填充）
       conv.messages.removeRange(index + 1, conv.messages.length);
     });
@@ -4905,8 +4960,8 @@ class _HomePageState extends State<HomePage>
       conv.messages.removeRange(index + 1, conv.messages.length);
       conv.messages.addAll(t.tail);
       // 切换分支时退出该条上的编辑态，避免用旧文本覆盖新分支
-      if (_editingIndex == index) _editingIndex = null;
-      if (_branchIndex == index) _branchIndex = null;
+      if (identical(_editingMsg, msg)) _editingMsg = null;
+      if (identical(_branchMsg, msg)) _branchMsg = null;
     });
     _persist(conv);
   }
@@ -5114,17 +5169,25 @@ class _HomePageState extends State<HomePage>
     final crossCount = count == 2 ? 2 : 3;
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
-      child: GridView.builder(
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: crossCount,
-          mainAxisSpacing: 6,
-          crossAxisSpacing: 6,
-          childAspectRatio: 1, // 多图正方形
-        ),
-        itemCount: count,
-        itemBuilder: (context, i) => _cachedImageThumb(context, images[i]),
+      // Wrap + 固定方形格子：不用 GridView（滚动视口在气泡 Column 内
+      // 的 shrinkWrap 尺寸计算会多出首行上方的空隙——多图气泡顶部
+      // 大空白的根源）；Wrap 尺寸精确且无滚动语义
+      child: LayoutBuilder(
+        builder: (context, c) {
+          final size = (c.maxWidth - 6 * (crossCount - 1)) / crossCount;
+          return Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final img in images)
+                SizedBox(
+                  width: size,
+                  height: size,
+                  child: _cachedImageThumb(context, img),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -7317,37 +7380,51 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                     ),
                   ],
                 ),
-                if (_expanded) ...[
-                  const SizedBox(height: 8),
-                  // 展开内容：最大高度限制（llama.cpp 28rem 的移动端折中），
-                  // 超出部分在块内滚动；拖动状态由 NotificationListener 跟踪
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 320),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: NotificationListener<ScrollNotification>(
-                        onNotification: _onScrollNotification,
-                        child: SingleChildScrollView(
-                          controller: _scroll,
-                          // 永远接受滚动手势：默认 Clamping 在边缘会拒绝
-                          // 新手势（竞技场输给外层聊天列表 → 到底后再拖
-                          // 会滚动整个屏幕）；AlwaysScrollable 让内层始终
-                          // 赢得手势，到底表现为边缘效果而非链到父级
-                          physics: const AlwaysScrollableScrollPhysics(
-                            parent: ClampingScrollPhysics(),
-                          ),
-                          child: SelectableText(
-                            widget.thinking,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: Colors.grey.shade700,
-                              height: 1.5,
+                // 展开/收起：AnimatedCrossFade（框架标准组件——
+                // 内部对尺寸做双轴 SizeTween 统一插值 + 交叉淡入，
+                // 宽高同曲线同时长，无轴间不均匀）
+                AnimatedCrossFade(
+                  duration: const Duration(milliseconds: 220),
+                  reverseDuration: const Duration(milliseconds: 180),
+                  sizeCurve: Curves.easeOutCubic,
+                  firstCurve: const Interval(0.5, 1.0),
+                  secondCurve: const Interval(0.0, 0.5),
+                  crossFadeState: _expanded
+                      ? CrossFadeState.showSecond
+                      : CrossFadeState.showFirst,
+                  firstChild: const SizedBox(width: double.infinity),
+                  secondChild: Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    // 展开内容：最大高度限制（llama.cpp 28rem 的移动端
+                    // 折中），超出部分在块内滚动；拖动状态由
+                    // NotificationListener 跟踪
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 320),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: _onScrollNotification,
+                          child: SingleChildScrollView(
+                            controller: _scroll,
+                            // 永远接受滚动手势：默认 Clamping 在边缘会
+                            // 拒绝新手势（竞技场输给外层聊天列表 →
+                            // 到底后再拖会滚动整个屏幕）
+                            physics: AlwaysScrollableScrollPhysics(
+                              parent: ClampingScrollPhysics(),
+                            ),
+                            child: SelectableText(
+                              widget.thinking,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: Colors.grey.shade700,
+                                height: 1.5,
+                              ),
                             ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ],
+                ),
               ],
             ),
           ),
@@ -7392,6 +7469,44 @@ class _MessageItem extends StatefulWidget {
 }
 
 class _MessageItemState extends State<_MessageItem> {
+  _HomePageState? _home;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首建即固化签名：否则 _sig=-1 时 didUpdateWidget 的
+    // 失效守卫不通过——首次点编辑/分支不清缓存，编辑器不出现
+    //（表现为「要先点另一个再点才生效」）
+    _sig = _signature();
+  }
+
+  void _onStreamTick() {
+    // 流式帧：签名变化（本条在更新）才自刷新；静态项零成本
+    if (_sig >= 0 && _sig != _signature()) {
+      setState(() {
+        _cached = null;
+        _sig = _signature();
+      });
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final home = _HomePageScope.of(context);
+    if (!identical(home, _home)) {
+      _home?._streamTick.removeListener(_onStreamTick);
+      _home = home;
+      home._streamTick.addListener(_onStreamTick);
+    }
+  }
+
+  @override
+  void dispose() {
+    _home?._streamTick.removeListener(_onStreamTick);
+    super.dispose();
+  }
+
   /// 子树缓存：静态消息项（内容签名未变）直接复用上一帧 Widget，
   /// 跳过 build——流式期间 HomePage 每 33ms setState，只有正在
   /// 生成的那条消息签名变化触发真实 rebuild

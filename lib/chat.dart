@@ -12,6 +12,15 @@ import 'general_settings.dart';
 /// 后台 isolate 用的会话序列化（ChatStore.save 经 compute 调用）
 String _encodeConversationJson(Conversation c) => jsonEncode(c.toJson());
 
+/// 会话文件解析（isolate 内执行）：读文件 + JSON 解码
+Map<String, dynamic>? _parseConversationFile(String path) {
+  try {
+    return jsonDecode(File(path).readAsStringSync()) as Map<String, dynamic>;
+  } catch (_) {
+    return null;
+  }
+}
+
 /// 请求体 JSON 编码（isolate 内执行）：含 N 张 base64 图片的请求体
 /// 可达几十 MB，主线程同步编码是上传卡顿来源
 String _encodeRequestBody(Map<String, dynamic> body) => jsonEncode(body);
@@ -805,6 +814,20 @@ class ChatStore {
     }
   }
 
+  /// 异步加载（isolate 读文件 + JSON 解析）：带图会话的文件几 MB，
+  /// 主线程同步解析会卡顿数百毫秒（切换对话卡顿的根源）
+  Future<Conversation?> loadConversationAsync(String id) async {
+    try {
+      final f = _file(id);
+      if (!f.existsSync()) return null;
+      final json = await compute(_parseConversationFile, f.path);
+      if (json == null) return null;
+      return Conversation.fromJson(json);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> save(Conversation c) async {
     // 壳对象（元数据被修改，如自动归档/锁定/恢复）：从文件合并正文，
     // 防止把空消息列表写回文件丢数据
@@ -1090,11 +1113,13 @@ class LlmService {
         {'role': 'system', 'content': systemPrompt.trim()},
       ...history
           .where(
+            // 思考不回传（DeepSeek 官方建议不回发 reasoning）；
+            // thinking-only 消息（截断在思考阶段）也不发送——
+            // 空 content 的 assistant 消息会被 API 400 拒绝
             (m) =>
                 m.content.isNotEmpty ||
                 (m.imageParts?.isNotEmpty ?? false) ||
-                (m.fileParts?.isNotEmpty ?? false) ||
-                (m.thinking?.isNotEmpty ?? false),
+                (m.fileParts?.isNotEmpty ?? false),
           )
           .map(
             (m) => {'role': _roleName(m.role), 'content': _contentPayload(m)},

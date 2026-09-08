@@ -4,6 +4,14 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+import 'dart:io';
+
+import 'package:archive/archive.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:share_plus/share_plus.dart';
+
 import 'chat.dart'
     show
         ChatStore,
@@ -3225,6 +3233,126 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
     _emit();
   }
 
+  /// 导出全部数据为 ZIP：convs/（会话文件）+ settings.json（prefs 全量
+  /// 键值）。生成后用系统分享面板保存/发送
+  Future<void> _exportData() async {
+    try {
+      final base = await getApplicationDocumentsDirectory();
+      final convsDir = Directory('${base.path}/convs');
+      final archive = Archive();
+      // 会话正文文件
+      if (convsDir.existsSync()) {
+        for (final f in convsDir.listSync()) {
+          if (f is File && f.path.endsWith('.json')) {
+            archive.addFile(
+              ArchiveFile(
+                'convs/${f.uri.pathSegments.last}',
+                f.lengthSync(),
+                f.readAsBytesSync(),
+              ),
+            );
+          }
+        }
+      }
+      // 设置（SharedPreferences 全量——含索引/提供方/规则/模板/开关）
+      final prefs = await SharedPreferences.getInstance();
+      final settings = <String, dynamic>{};
+      // 只导我们应用的键（prefs 里可能有插件键）
+      prefs.getKeys();
+      final ourKeys = prefs
+          .getKeys()
+          .where((k) => !k.startsWith('flutter.') && !k.startsWith('plugin'))
+          .toList();
+      // 保守：导出全部非 flutter 前缀键
+      for (final k in ourKeys) {
+        settings[k] = prefs.get(k);
+      }
+      final settingsBytes = utf8.encode(jsonEncode(settings));
+      archive.addFile(
+        ArchiveFile('settings.json', settingsBytes.length, settingsBytes),
+      );
+      final zipBytes = ZipEncoder().encode(archive);
+      // 写临时文件 + 分享
+      final tmp = File(
+        '${(await getTemporaryDirectory()).path}/'
+        'LLM_Chat_backup_${DateTime.now().millisecondsSinceEpoch}.zip',
+      );
+      await tmp.writeAsBytes(zipBytes, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(tmp.path)],
+          fileNameOverrides: [tmp.uri.pathSegments.last],
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      }
+    }
+  }
+
+  /// 导入 ZIP：合并会话文件（同 ID 覆盖）+ 设置键值，完成后提示重启
+  Future<void> _importData() async {
+    final result = await FilePicker.pickFiles(
+      allowedExtensions: ['zip'],
+      withData: true,
+    );
+    final f = result?.files.firstOrNull;
+    if (f == null) return;
+    try {
+      final archive = ZipDecoder().decodeBytes(f.bytes!);
+      final base = await getApplicationDocumentsDirectory();
+      final convsDir = Directory('${base.path}/convs');
+      if (!convsDir.existsSync()) convsDir.createSync(recursive: true);
+      var convCount = 0;
+      final settings = <String, dynamic>{};
+      for (final file in archive) {
+        if (file.isFile) {
+          final data = file.content as List<int>;
+          if (file.name.startsWith('convs/') && file.name.endsWith('.json')) {
+            final name = file.name.split('/').last;
+            File('${convsDir.path}/$name').writeAsBytesSync(data);
+            convCount++;
+          } else if (file.name == 'settings.json') {
+            settings.addAll(
+              jsonDecode(utf8.decode(data)) as Map<String, dynamic>,
+            );
+          }
+        }
+      }
+      // 设置合并写回 prefs
+      if (settings.isNotEmpty) {
+        final prefs = await SharedPreferences.getInstance();
+        for (final e in settings.entries) {
+          final v = e.value;
+          if (v is String) {
+            prefs.setString(e.key, v);
+          } else if (v is int) {
+            prefs.setInt(e.key, v);
+          } else if (v is double) {
+            prefs.setDouble(e.key, v);
+          } else if (v is bool) {
+            prefs.setBool(e.key, v);
+          } else if (v is List) {
+            prefs.setStringList(e.key, v.whereType<String>().toList());
+          }
+        }
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('已导入 $convCount 个对话与设置，重启应用后生效')));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('导入失败：文件格式错误')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isAiTitle = _s.titleStrategy == TitleStrategy.ai;
@@ -3506,6 +3634,40 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
           const SizedBox(height: 20),
 
           // ── 归档 ──
+          _sectionLabel('数据管理'),
+          Row(
+            children: [
+              Expanded(
+                child: _primaryButton(
+                  context: context,
+                  label: '导出数据（ZIP）',
+                  onPressed: _exportData,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _primaryButton(
+                  context: context,
+                  label: '导入数据',
+                  onPressed: _importData,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              '导出包含：全部对话（含图片/附件）、提供方与模型、通用设置、'
+              '替换规则、提示词模板、MCP 配置。导入会合并到现有数据'
+              '（同 ID 对话覆盖）。',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+
           _sectionLabel('归档'),
           _switchTile(
             context,
