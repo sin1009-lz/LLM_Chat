@@ -7103,9 +7103,9 @@ class _GlassInputBarState extends State<_GlassInputBar> {
     final initTop = (_side - _inputHeight) / 2;
     final inputTop = _active ? _topPad : initTop;
 
-    // 输入栏容器总高（占位 + 按钮行）——上报给附件条绑定
-    final containerHeight = (_active ? _topPad + _inputHeight : 0) + _side;
-    widget.containerTopNotifier.value = containerHeight + 8;
+    // 容器动画高度的上报（附件条跟随）见占位 TweenAnimationBuilder——
+    // 逐帧把动画中的真实高度写进 containerTopNotifier；不再在 build
+    // 里一次性写终点值（那会让附件条瞬移到终点，与容器动画脱节）
 
     return Align(
       alignment: Alignment.bottomCenter,
@@ -7143,10 +7143,25 @@ class _GlassInputBarState extends State<_GlassInputBar> {
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  AnimatedContainer(
+                  // TweenAnimationBuilder（替代 AnimatedContainer）：每帧拿到
+                  // 插值中的高度 v，既画占位也逐帧上报给附件条/列表留白——
+                  // 附件条跟着容器一起动画，而不是瞬移到终点。
+                  // 曲线/时长与原 AnimatedContainer 一致（easeOutBack 回弹一致）
+                  TweenAnimationBuilder<double>(
+                    tween: Tween(
+                      begin: 0.0,
+                      end: _active ? _topPad + _inputHeight : 0.0,
+                    ),
                     duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOutBack, // 非线性：先快后缓 + 轻微回弹
-                    height: _active ? _topPad + _inputHeight : 0,
+                    curve: Curves.easeOutBack,
+                    builder: (context, v, _) {
+                      // 帧后上报：build 期间改 ValueNotifier 会同步通知监听者
+                      //（ValueListenableBuilder）触发 mid-build 重建
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        widget.containerTopNotifier.value = v + _side + 8;
+                      });
+                      return SizedBox(width: double.infinity, height: v);
+                    },
                   ),
                   SizedBox(width: containerWidth, height: _side),
                 ],
