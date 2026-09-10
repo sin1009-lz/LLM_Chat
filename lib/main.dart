@@ -7997,25 +7997,63 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                               constraints: const BoxConstraints(
                                 maxHeight: 320,
                               ),
-                              child: SizedBox(
-                                width: double.infinity,
-                                child: NotificationListener<ScrollNotification>(
-                                  onNotification: _onScrollNotification,
-                                  child: SingleChildScrollView(
-                                    controller: _scroll,
-                                    // 永远接受滚动手势：默认 Clamping 在边缘
-                                    // 会拒绝新手势（竞技场输给外层聊天列表 →
-                                    // 到底后再拖会滚动整个屏幕）
-                                    physics: AlwaysScrollableScrollPhysics(
-                                      parent: ClampingScrollPhysics(),
+                              // 上下边缘字符渐隐（ShaderMask dstIn，同附件条
+                              // 横向渐隐的做法）：仅该方向有未滚到的内容时
+                              // 才渐隐（顶部有上文/底部有下文），滚到尽头该端
+                              // 渐隐消失；ListenableBuilder 随滚动位置刷新
+                              child: ListenableBuilder(
+                                listenable: _scroll,
+                                builder: (context, child) {
+                                  var topStop = 0.0;
+                                  var bottomStop = 1.0;
+                                  if (_scroll.hasClients) {
+                                    final pos = _scroll.position;
+                                    if (pos.maxScrollExtent > 0.5) {
+                                      final f =
+                                          28 / pos.viewportDimension;
+                                      if (pos.pixels > 0.5) topStop = f;
+                                      if (pos.pixels <
+                                          pos.maxScrollExtent - 0.5) {
+                                        bottomStop = 1 - f;
+                                      }
+                                    }
+                                  }
+                                  return ShaderMask(
+                                    shaderCallback: (rect) => LinearGradient(
+                                      begin: Alignment.topCenter,
+                                      end: Alignment.bottomCenter,
+                                      colors: const [
+                                        Color(0x00FFFFFF),
+                                        Color(0xFFFFFFFF),
+                                        Color(0xFFFFFFFF),
+                                        Color(0x00FFFFFF),
+                                      ],
+                                      stops: [0.0, topStop, bottomStop, 1.0],
+                                    ).createShader(rect),
+                                    blendMode: BlendMode.dstIn,
+                                    child: child,
+                                  );
+                                },
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  child: NotificationListener<ScrollNotification>(
+                                    onNotification: _onScrollNotification,
+                                    child: SingleChildScrollView(
+                                      controller: _scroll,
+                                      // 永远接受滚动手势：默认 Clamping 在边缘
+                                      // 会拒绝新手势（竞技场输给外层聊天列表 →
+                                      // 到底后再拖会滚动整个屏幕）
+                                      physics: AlwaysScrollableScrollPhysics(
+                                        parent: ClampingScrollPhysics(),
+                                      ),
+                                      child: widget.streaming
+                                          // 流式：Text（轻量，尾部窗口内）
+                                          ? Text(text, style: thinkStyle)
+                                          : SelectableText(
+                                              text,
+                                              style: thinkStyle,
+                                            ),
                                     ),
-                                    child: widget.streaming
-                                        // 流式：Text（轻量，尾部窗口内）
-                                        ? Text(text, style: thinkStyle)
-                                        : SelectableText(
-                                            text,
-                                            style: thinkStyle,
-                                          ),
                                   ),
                                 ),
                               ),
