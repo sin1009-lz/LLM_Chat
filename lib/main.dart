@@ -4791,7 +4791,11 @@ class _HomePageState extends State<HomePage>
               if (!isUser &&
                   (_thinkingDepth > 0 || m.truncated) &&
                   (m.displayThinking?.isNotEmpty ?? false))
-                _thinkingBlock(context, _displayCached(m.displayThinking!)),
+                _thinkingBlock(
+                  context,
+                  _displayCached(m.displayThinking!),
+                  streaming: isStreamingTarget,
+                ),
               // 气泡本体（无阴影；助手灰色、用户品牌蓝）。
               // 无正式内容（仅工具调用）时不渲染；正在流式接收（打字点）除外
               if (hasBubbleContent || isStreamingTarget)
@@ -5933,9 +5937,10 @@ class _HomePageState extends State<HomePage>
 
   /// 思考过程折叠块（llama.cpp 风格：灰色小字 + 展开/收起）。
   /// 展开时思考区增高：上翻补偿/贴底保持由 ChatScrollPosition 在
-  /// 布局阶段统一处理（correctForNewDimensions），无需额外干预
-  Widget _thinkingBlock(BuildContext context, String thinking) {
-    return _ThinkingBlock(thinking: thinking);
+  /// 布局阶段统一处理（correctForNewDimensions），无需额外干预。
+  /// [streaming] 流式接收中：尾部窗口 + Text（见 _ThinkingBlock 注释）
+  Widget _thinkingBlock(BuildContext context, String thinking, {bool streaming = false}) {
+    return _ThinkingBlock(thinking: thinking, streaming: streaming);
   }
 
   /// 流式等待占位（三个点）
@@ -7817,13 +7822,21 @@ class _TypingDotsPainter extends CustomPainter {
 
 /// 思考过程折叠块（llama.cpp 风格：灰色小字 + 展开/收起箭头）
 class _ThinkingBlock extends StatefulWidget {
-  const _ThinkingBlock({required this.thinking});
+  const _ThinkingBlock({required this.thinking, this.streaming = false});
 
   final String thinking;
+
+  /// 流式接收中：尾部固定窗口 + 普通 Text——SelectableText 对大文本
+  /// 是 O(n) 全量重排（含选择区域构建），每 33ms 一帧时是卡顿主因；
+  /// 尾部窗口把每帧布局成本压成常数。完成后自动切回全文可选中
+  final bool streaming;
 
   @override
   State<_ThinkingBlock> createState() => _ThinkingBlockState();
 }
+
+/// 流式期间显示的思考尾部窗口（字符）：约一屏多的量，够看实时输出
+const int _kStreamThinkWindow = 4000;
 
 class _ThinkingBlockState extends State<_ThinkingBlock> {
   // 默认收起：只显示「思考过程」标签行，点击展开
@@ -7879,6 +7892,17 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // 流式：尾部窗口（超长思考只显示最后 _kStreamThinkWindow 字符，
+    // 每帧布局成本恒定）；完成后显示全文
+    final full = widget.thinking;
+    final text = widget.streaming && full.length > _kStreamThinkWindow
+        ? '…（前面 ${full.length - _kStreamThinkWindow} 字流式期间已折叠，完成后可上翻查看）\n'
+              '${full.substring(full.length - _kStreamThinkWindow)}'
+        : full;
+    final thinkStyle = theme.textTheme.bodySmall?.copyWith(
+      color: Colors.grey.shade700,
+      height: 1.5,
+    );
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Material(
@@ -7956,14 +7980,13 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                                     physics: AlwaysScrollableScrollPhysics(
                                       parent: ClampingScrollPhysics(),
                                     ),
-                                    child: SelectableText(
-                                      widget.thinking,
-                                      style: theme.textTheme.bodySmall
-                                          ?.copyWith(
-                                            color: Colors.grey.shade700,
-                                            height: 1.5,
+                                    child: widget.streaming
+                                        // 流式：Text（轻量，尾部窗口内）
+                                        ? Text(text, style: thinkStyle)
+                                        : SelectableText(
+                                            text,
+                                            style: thinkStyle,
                                           ),
-                                    ),
                                   ),
                                 ),
                               ),
