@@ -86,6 +86,8 @@ flutter:
   assets:
     - assets/mermaid.html
     - assets/mermaid.min.js
+    - assets/python_kernel.html
+    - assets/pyodide/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -53,6 +53,7 @@ class GeneralSettings {
     required this.builtinTimeEnabled,
     required this.builtinLocationEnabled,
     required this.builtinSearchEnabled,
+    required this.builtinPythonEnabled,
     required this.pdfAsImage,
     required this.contextPercent,
     required this.reactMaxRounds,
@@ -83,6 +84,7 @@ class GeneralSettings {
     builtinTimeEnabled: true,
     builtinLocationEnabled: true,
     builtinSearchEnabled: true,
+    builtinPythonEnabled: true,
     pdfAsImage: false,
     contextPercent: false,
     reactMaxRounds: 6,
@@ -165,6 +167,9 @@ class GeneralSettings {
   /// 内置工具明细开关：联网搜索
   final bool builtinSearchEnabled;
 
+  /// 内置工具明细开关：运行 Python 代码
+  final bool builtinPythonEnabled;
+
   /// 将 PDF 附件解析为图像发送（多模态模型可查看内容）
   final bool pdfAsImage;
 
@@ -198,6 +203,7 @@ class GeneralSettings {
     bool? builtinTimeEnabled,
     bool? builtinLocationEnabled,
     bool? builtinSearchEnabled,
+    bool? builtinPythonEnabled,
     bool? pdfAsImage,
     bool? contextPercent,
     int? reactMaxRounds,
@@ -226,6 +232,7 @@ class GeneralSettings {
     builtinLocationEnabled:
         builtinLocationEnabled ?? this.builtinLocationEnabled,
     builtinSearchEnabled: builtinSearchEnabled ?? this.builtinSearchEnabled,
+    builtinPythonEnabled: builtinPythonEnabled ?? this.builtinPythonEnabled,
     pdfAsImage: pdfAsImage ?? this.pdfAsImage,
     contextPercent: contextPercent ?? this.contextPercent,
     reactMaxRounds: reactMaxRounds ?? this.reactMaxRounds,
@@ -255,6 +262,7 @@ class GeneralSettings {
     'builtinTimeEnabled': builtinTimeEnabled,
     'builtinLocationEnabled': builtinLocationEnabled,
     'builtinSearchEnabled': builtinSearchEnabled,
+    'builtinPythonEnabled': builtinPythonEnabled,
     'pdfAsImage': pdfAsImage,
     'contextPercent': contextPercent,
     'reactMaxRounds': reactMaxRounds,
@@ -298,6 +306,8 @@ class GeneralSettings {
           j['builtinLocationEnabled'] as bool? ?? d.builtinLocationEnabled,
       builtinSearchEnabled:
           j['builtinSearchEnabled'] as bool? ?? d.builtinSearchEnabled,
+      builtinPythonEnabled:
+          j['builtinPythonEnabled'] as bool? ?? d.builtinPythonEnabled,
       pdfAsImage: j['pdfAsImage'] as bool? ?? d.pdfAsImage,
       contextPercent: j['contextPercent'] as bool? ?? d.contextPercent,
       reactMaxRounds:

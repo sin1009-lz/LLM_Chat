@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -3189,6 +3190,9 @@ class _GeneralSettingsPage extends StatefulWidget {
 }
 
 class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
+  /// 导出进行中（非模态遮罩转圈）
+  bool _exporting = false;
+
   late GeneralSettings _s = widget.settings;
   late final TextEditingController _promptCtrl = TextEditingController(
     text: _s.aiTitlePrompt,
@@ -3236,66 +3240,43 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
   /// 导出全部数据为 ZIP：convs/（会话文件）+ settings.json（prefs 全量
   /// 键值）。生成后用系统分享面板保存/发送
   Future<void> _exportData() async {
+    // 打包动画（非模态转圈遮罩）：后台 isolate 压缩期间反馈进行中
+    setState(() => _exporting = true);
     try {
       final base = await getApplicationDocumentsDirectory();
-      final convsDir = Directory('${base.path}/convs');
-      final archive = Archive();
-      // 会话正文文件
-      if (convsDir.existsSync()) {
-        for (final f in convsDir.listSync()) {
-          if (f is File && f.path.endsWith('.json')) {
-            archive.addFile(
-              ArchiveFile(
-                'convs/${f.uri.pathSegments.last}',
-                f.lengthSync(),
-                f.readAsBytesSync(),
-              ),
-            );
-          }
-        }
-      }
+      final tmpDir = await getTemporaryDirectory();
       // 设置（SharedPreferences 全量——含索引/提供方/规则/模板/开关）
       final prefs = await SharedPreferences.getInstance();
       final settings = <String, dynamic>{};
-      // 只导我们应用的键（prefs 里可能有插件键）
-      prefs.getKeys();
-      final ourKeys = prefs
-          .getKeys()
-          .where((k) => !k.startsWith('flutter.') && !k.startsWith('plugin'))
-          .toList();
-      // 保守：导出全部非 flutter 前缀键
-      for (final k in ourKeys) {
+      for (final k in prefs.getKeys()) {
+        if (k.startsWith('flutter.') || k.startsWith('plugin')) continue;
         settings[k] = prefs.get(k);
       }
-      final settingsBytes = utf8.encode(jsonEncode(settings));
-      archive.addFile(
-        ArchiveFile('settings.json', settingsBytes.length, settingsBytes),
-      );
-      final zipBytes = ZipEncoder().encode(archive);
-      // 写临时文件 + 分享
-      final tmp = File(
-        '${(await getTemporaryDirectory()).path}/'
-        'LLM_Chat_backup_${DateTime.now().millisecondsSinceEpoch}.zip',
-      );
-      await tmp.writeAsBytes(zipBytes, flush: true);
-      await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(tmp.path)],
-          fileNameOverrides: [tmp.uri.pathSegments.last],
-        ),
-      );
+      // 打包 + 压缩全部在 isolate：带图会话几十 MB 的读盘/zip 在主线程
+      // 会冻结 UI（ANR 级卡死）
+      final tmpPath = await compute(_zipBackupIsolate, {
+        'convsDir': '${base.path}/convs',
+        'settingsJson': jsonEncode(settings),
+        'outPath':
+            '${tmpDir.path}/'
+            'LLM_Chat_backup_${DateTime.now().millisecondsSinceEpoch}.zip',
+      });
+      await SharePlus.instance.share(ShareParams(files: [XFile(tmpPath)]));
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('导出失败：$e')));
       }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
     }
   }
 
   /// 导入 ZIP：合并会话文件（同 ID 覆盖）+ 设置键值，完成后提示重启
   Future<void> _importData() async {
     final result = await FilePicker.pickFiles(
+      type: FileType.custom,
       allowedExtensions: ['zip'],
       withData: true,
     );
@@ -3359,389 +3340,422 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
     return _projectScaffold(
       context: context,
       title: '通用',
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      body: Stack(
         children: [
-          // ── 输入 ──
-          _sectionLabel('输入'),
-          _switchTile(
-            context,
-            icon: Icons.content_paste_go,
-            title: '粘贴长文本转为文件',
-            subtitle: '超过阈值的粘贴文本自动转为 .txt 附件',
-            value: _s.pasteLongTextAsFile,
-            onChanged: (v) =>
-                _update((s) => s.copyWith(pasteLongTextAsFile: v)),
-          ),
-          const SizedBox(height: 12),
-          // 阈值输入（与文字替换页内联编辑同款卡片包裹）
-          Material(
-            color: _buttonColor(context),
-            borderRadius: BorderRadius.circular(14),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: _projectInput(
-                context: context,
-                controller: _thresholdCtrl,
-                label: '字符阈值',
-                hint: '超过此长度的粘贴文本转附件',
-                enabled: _s.pasteLongTextAsFile,
-                keyboardType: TextInputType.number,
-                onChanged: (v) {
-                  final n = int.tryParse(v);
-                  if (n != null && n > 0) {
-                    _update((s) => s.copyWith(pasteThreshold: n));
-                  }
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          // 将 PDF 解析为图像：发送时渲染每页为图片（多模态模型可查看）
-          _switchTile(
-            context,
-            icon: Icons.picture_as_pdf_outlined,
-            title: '将 PDF 解析为图像',
-            subtitle: 'PDF 附件渲染为图片发送，模型可直接查看内容',
-            value: _s.pdfAsImage,
-            onChanged: (v) => _update((s) => s.copyWith(pdfAsImage: v)),
-          ),
-          const SizedBox(height: 20),
-
-          // ── 对话标题 ──
-          _sectionLabel('默认提示词'),
-          // 会话未设置自己的提示词时使用（空 = 不发送）；常驻编辑框
-          Material(
-            color: _buttonColor(context),
-            borderRadius: BorderRadius.circular(14),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: _projectInput(
-                context: context,
-                controller: _sysPromptCtrl,
-                label: '默认 System 提示词',
-                hint: '留空 = 新对话不发送 system',
-                maxLines: 6,
+          ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              // ── 输入 ──
+              _sectionLabel('输入'),
+              _switchTile(
+                context,
+                icon: Icons.content_paste_go,
+                title: '粘贴长文本转为文件',
+                subtitle: '超过阈值的粘贴文本自动转为 .txt 附件',
+                value: _s.pasteLongTextAsFile,
                 onChanged: (v) =>
-                    _update((s) => s.copyWith(defaultSystemPrompt: v)),
+                    _update((s) => s.copyWith(pasteLongTextAsFile: v)),
               ),
-            ),
-          ),
-          const SizedBox(height: 20),
-
-          _sectionLabel('对话标题'),
-          for (final strategy in TitleStrategy.values) ...[
-            _strategyTile(
-              strategy,
-              // AI 行：右侧热区（行宽 - 72px）点按展开/收起，其余点按只选中；
-              // 波纹铺满整个选项卡
-              trailing: strategy == TitleStrategy.ai
-                  ? Icon(
-                      _aiPromptExpanded
-                          ? Icons.expand_more
-                          : Icons.chevron_right,
-                      size: 24, // 大一点，右侧热区即按钮
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    )
-                  : null,
-              onTapUp: strategy == TitleStrategy.ai
-                  ? (d, width) {
-                      // 右侧 2/5 卡片区域 = 展开热区，其余 = 选中策略
-                      if (d.localPosition.dx > width * 0.6) {
-                        setState(() => _aiPromptExpanded = !_aiPromptExpanded);
-                      } else {
-                        _update((s) => s.copyWith(titleStrategy: strategy));
+              const SizedBox(height: 12),
+              // 阈值输入（与文字替换页内联编辑同款卡片包裹）
+              Material(
+                color: _buttonColor(context),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: _projectInput(
+                    context: context,
+                    controller: _thresholdCtrl,
+                    label: '字符阈值',
+                    hint: '超过此长度的粘贴文本转附件',
+                    enabled: _s.pasteLongTextAsFile,
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) {
+                      final n = int.tryParse(v);
+                      if (n != null && n > 0) {
+                        _update((s) => s.copyWith(pasteThreshold: n));
                       }
-                    }
-                  : null,
-            ),
-            if (strategy == TitleStrategy.ai) ...[
-              // AI 标题展开区（提示词 + 生成模型）：收纳在 AI 生成开关下，
-              // 开/关都有过渡动画（AnimatedCrossFade：淡入淡出 + 高度过渡）
-              AnimatedCrossFade(
-                duration: const Duration(milliseconds: 220),
-                sizeCurve: Curves.easeOutCubic,
-                firstChild: const SizedBox(width: double.infinity),
-                secondChild: Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Material(
-                        color: _buttonColor(context),
-                        borderRadius: BorderRadius.circular(14),
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: _projectInput(
-                            context: context,
-                            controller: _promptCtrl,
-                            label: 'AI 标题生成提示词',
-                            hint: '含 {{USER}} / {{ASSISTANT}} 占位符',
-                            maxLines: 6,
-                            onChanged: (v) =>
-                                _update((s) => s.copyWith(aiTitlePrompt: v)),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      // 生成模型：收纳进 AI 生成展开区（展开下拉栏）
-                      _modelDropdown(),
-                    ],
+                    },
                   ),
                 ),
-                crossFadeState: isAiTitle && _aiPromptExpanded
-                    ? CrossFadeState.showSecond
-                    : CrossFadeState.showFirst,
               ),
               const SizedBox(height: 12),
-            ] else
-              const SizedBox(height: 12),
-          ],
-          const SizedBox(height: 12),
-
-          // ── 渲染 ──
-          _sectionLabel('渲染'),
-          _switchTile(
-            context,
-            icon: Icons.article_outlined,
-            title: 'Markdown 渲染',
-            subtitle: '消息正文按 Markdown 格式渲染',
-            value: _s.markdownEnabled,
-            onChanged: (v) => _update((s) => s.copyWith(markdownEnabled: v)),
-          ),
-          const SizedBox(height: 12),
-          // 上下文占用百分比（默认只显示圆环；开启后百分比显示在圆环右侧）
-          _switchTile(
-            context,
-            icon: Icons.donut_large,
-            title: '上下文占用百分比',
-            subtitle: '在输出气泡的上下文占用圆环右侧显示百分比',
-            value: _s.contextPercent,
-            onChanged: (v) => _update((s) => s.copyWith(contextPercent: v)),
-          ),
-          const SizedBox(height: 12),
-          _switchTile(
-            context,
-            icon: Icons.functions,
-            title: 'LaTeX 渲染',
-            subtitle: '识别 \$...\$ 与 \$\$...\$\$ 数学公式',
-            value: _s.latexEnabled,
-            onChanged: (v) => _update((s) => s.copyWith(latexEnabled: v)),
-          ),
-          const SizedBox(height: 12),
-          _switchTile(
-            context,
-            icon: Icons.account_tree_outlined,
-            title: 'Mermaid 图表',
-            subtitle: '渲染 mermaid 代码块为流程图',
-            value: _s.mermaidEnabled,
-            onChanged: (v) => _update((s) => s.copyWith(mermaidEnabled: v)),
-          ),
-          const SizedBox(height: 12),
-          _switchTile(
-            context,
-            icon: Icons.preview_outlined,
-            title: 'Artifacts 预览',
-            subtitle: '自动预览 HTML/SVG 代码块的生成物',
-            value: _s.artifactsEnabled,
-            onChanged: (v) => _update((s) => s.copyWith(artifactsEnabled: v)),
-          ),
-          const SizedBox(height: 20),
-
-          // ── 内置工具 ──
-          _sectionLabel('内置工具'),
-          _switchTile(
-            context,
-            icon: Icons.build_outlined,
-            title: '内置工具',
-            subtitle: '启用后模型可调用以下工具（可单独开关）',
-            value: _s.builtinToolsEnabled,
-            onChanged: (v) =>
-                _update((s) => s.copyWith(builtinToolsEnabled: v)),
-          ),
-          const SizedBox(height: 12),
-          _switchTile(
-            context,
-            icon: Icons.schedule,
-            title: '获取当前时间',
-            subtitle: 'builtin__get_current_time',
-            // 子开关与总开关相互独立：各自记忆并始终可操作
-            value: _s.builtinTimeEnabled,
-            onChanged: (v) => _update((s) => s.copyWith(builtinTimeEnabled: v)),
-          ),
-          const SizedBox(height: 12),
-          _switchTile(
-            context,
-            icon: Icons.location_on_outlined,
-            title: '获取地理位置',
-            subtitle: 'builtin__get_location（需定位权限）',
-            value: _s.builtinLocationEnabled,
-            onChanged: (v) =>
-                _update((s) => s.copyWith(builtinLocationEnabled: v)),
-          ),
-          const SizedBox(height: 12),
-          _switchTile(
-            context,
-            icon: Icons.travel_explore,
-            title: '联网搜索',
-            subtitle: 'builtin__web_search（DeepSeek 原生搜索）',
-            value: _s.builtinSearchEnabled,
-            onChanged: (v) =>
-                _update((s) => s.copyWith(builtinSearchEnabled: v)),
-          ),
-          const SizedBox(height: 12),
-          Material(
-            color: _buttonColor(context),
-            borderRadius: BorderRadius.circular(14),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: _projectInput(
-                context: context,
-                controller: _reactRoundsCtrl,
-                label: '工具循环上限（轮）',
-                hint: '默认 6，范围 2-20',
-                keyboardType: TextInputType.number,
-                onChanged: (v) {
-                  final n = int.tryParse(v);
-                  if (n != null && n >= 2 && n <= 20) {
-                    _update((s) => s.copyWith(reactMaxRounds: n));
-                  }
-                },
+              // 将 PDF 解析为图像：发送时渲染每页为图片（多模态模型可查看）
+              _switchTile(
+                context,
+                icon: Icons.picture_as_pdf_outlined,
+                title: '将 PDF 解析为图像',
+                subtitle: 'PDF 附件渲染为图片发送，模型可直接查看内容',
+                value: _s.pdfAsImage,
+                onChanged: (v) => _update((s) => s.copyWith(pdfAsImage: v)),
               ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              '模型自主调用工具（搜索/时间/位置/MCP）的最大迭代轮数；'
-              '上限越高模型可进行更多轮搜索，同时消耗更多 token。',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              '可在输入栏加号面板中按对话单独开启/关闭内置工具。',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
+              const SizedBox(height: 20),
 
-          // ── 归档 ──
-          _sectionLabel('数据管理'),
-          Row(
-            children: [
-              Expanded(
-                child: _primaryButton(
-                  context: context,
-                  label: '导出数据（ZIP）',
-                  onPressed: _exportData,
+              // ── 对话标题 ──
+              _sectionLabel('默认提示词'),
+              // 会话未设置自己的提示词时使用（空 = 不发送）；常驻编辑框
+              Material(
+                color: _buttonColor(context),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: _projectInput(
+                    context: context,
+                    controller: _sysPromptCtrl,
+                    label: '默认 System 提示词',
+                    hint: '留空 = 新对话不发送 system',
+                    maxLines: 6,
+                    onChanged: (v) =>
+                        _update((s) => s.copyWith(defaultSystemPrompt: v)),
+                  ),
                 ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _primaryButton(
-                  context: context,
-                  label: '导入数据',
-                  onPressed: _importData,
+              const SizedBox(height: 20),
+
+              _sectionLabel('对话标题'),
+              for (final strategy in TitleStrategy.values) ...[
+                _strategyTile(
+                  strategy,
+                  // AI 行：右侧热区（行宽 - 72px）点按展开/收起，其余点按只选中；
+                  // 波纹铺满整个选项卡
+                  trailing: strategy == TitleStrategy.ai
+                      ? Icon(
+                          _aiPromptExpanded
+                              ? Icons.expand_more
+                              : Icons.chevron_right,
+                          size: 24, // 大一点，右侧热区即按钮
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        )
+                      : null,
+                  onTapUp: strategy == TitleStrategy.ai
+                      ? (d, width) {
+                          // 右侧 2/5 卡片区域 = 展开热区，其余 = 选中策略
+                          if (d.localPosition.dx > width * 0.6) {
+                            setState(
+                              () => _aiPromptExpanded = !_aiPromptExpanded,
+                            );
+                          } else {
+                            _update((s) => s.copyWith(titleStrategy: strategy));
+                          }
+                        }
+                      : null,
+                ),
+                if (strategy == TitleStrategy.ai) ...[
+                  // AI 标题展开区（提示词 + 生成模型）：收纳在 AI 生成开关下，
+                  // 开/关都有过渡动画（AnimatedCrossFade：淡入淡出 + 高度过渡）
+                  AnimatedCrossFade(
+                    duration: const Duration(milliseconds: 220),
+                    sizeCurve: Curves.easeOutCubic,
+                    firstChild: const SizedBox(width: double.infinity),
+                    secondChild: Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Material(
+                            color: _buttonColor(context),
+                            borderRadius: BorderRadius.circular(14),
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: _projectInput(
+                                context: context,
+                                controller: _promptCtrl,
+                                label: 'AI 标题生成提示词',
+                                hint: '含 {{USER}} / {{ASSISTANT}} 占位符',
+                                maxLines: 6,
+                                onChanged: (v) => _update(
+                                  (s) => s.copyWith(aiTitlePrompt: v),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          // 生成模型：收纳进 AI 生成展开区（展开下拉栏）
+                          _modelDropdown(),
+                        ],
+                      ),
+                    ),
+                    crossFadeState: isAiTitle && _aiPromptExpanded
+                        ? CrossFadeState.showSecond
+                        : CrossFadeState.showFirst,
+                  ),
+                  const SizedBox(height: 12),
+                ] else
+                  const SizedBox(height: 12),
+              ],
+              const SizedBox(height: 12),
+
+              // ── 渲染 ──
+              _sectionLabel('渲染'),
+              _switchTile(
+                context,
+                icon: Icons.article_outlined,
+                title: 'Markdown 渲染',
+                subtitle: '消息正文按 Markdown 格式渲染',
+                value: _s.markdownEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(markdownEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              // 上下文占用百分比（默认只显示圆环；开启后百分比显示在圆环右侧）
+              _switchTile(
+                context,
+                icon: Icons.donut_large,
+                title: '上下文占用百分比',
+                subtitle: '在输出气泡的上下文占用圆环右侧显示百分比',
+                value: _s.contextPercent,
+                onChanged: (v) => _update((s) => s.copyWith(contextPercent: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.functions,
+                title: 'LaTeX 渲染',
+                subtitle: '识别 \$...\$ 与 \$\$...\$\$ 数学公式',
+                value: _s.latexEnabled,
+                onChanged: (v) => _update((s) => s.copyWith(latexEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.account_tree_outlined,
+                title: 'Mermaid 图表',
+                subtitle: '渲染 mermaid 代码块为流程图',
+                value: _s.mermaidEnabled,
+                onChanged: (v) => _update((s) => s.copyWith(mermaidEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.preview_outlined,
+                title: 'Artifacts 预览',
+                subtitle: '自动预览 HTML/SVG 代码块的生成物',
+                value: _s.artifactsEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(artifactsEnabled: v)),
+              ),
+              const SizedBox(height: 20),
+
+              // ── 内置工具 ──
+              _sectionLabel('内置工具'),
+              _switchTile(
+                context,
+                icon: Icons.build_outlined,
+                title: '内置工具',
+                subtitle: '启用后模型可调用以下工具（可单独开关）',
+                value: _s.builtinToolsEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinToolsEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.schedule,
+                title: '获取当前时间',
+                subtitle: 'builtin__get_current_time',
+                // 子开关与总开关相互独立：各自记忆并始终可操作
+                value: _s.builtinTimeEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinTimeEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.location_on_outlined,
+                title: '获取地理位置',
+                subtitle: 'builtin__get_location（需定位权限）',
+                value: _s.builtinLocationEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinLocationEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.travel_explore,
+                title: '联网搜索',
+                subtitle: 'builtin__web_search（DeepSeek 原生搜索）',
+                value: _s.builtinSearchEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinSearchEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              Material(
+                color: _buttonColor(context),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: _projectInput(
+                    context: context,
+                    controller: _reactRoundsCtrl,
+                    label: '工具循环上限（轮）',
+                    hint: '默认 6，范围 2-20',
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) {
+                      final n = int.tryParse(v);
+                      if (n != null && n >= 2 && n <= 20) {
+                        _update((s) => s.copyWith(reactMaxRounds: n));
+                      }
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  '模型自主调用工具（搜索/时间/位置/MCP）的最大迭代轮数；'
+                  '上限越高模型可进行更多轮搜索，同时消耗更多 token。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  '可在输入栏加号面板中按对话单独开启/关闭内置工具。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // ── 归档 ──
+              _sectionLabel('数据管理'),
+              Row(
+                children: [
+                  Expanded(
+                    child: _primaryButton(
+                      context: context,
+                      label: '导出数据（ZIP）',
+                      onPressed: _exportData,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _primaryButton(
+                      context: context,
+                      label: '导入数据',
+                      onPressed: _importData,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  '导出包含：全部对话（含图片/附件）、提供方与模型、通用设置、'
+                  '替换规则、提示词模板、MCP 配置。导入会合并到现有数据'
+                  '（同 ID 对话覆盖）。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              _sectionLabel('归档'),
+              _switchTile(
+                context,
+                icon: Icons.archive_outlined,
+                title: '自动归档',
+                subtitle: '未活跃超过设定天数的对话自动归档（锁定的除外）',
+                value: _s.autoArchiveDays > 0,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(autoArchiveDays: v ? 30 : 0)),
+              ),
+              const SizedBox(height: 12),
+              Material(
+                color: _buttonColor(context),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: _projectInput(
+                    context: context,
+                    controller: _archiveCtrl,
+                    label: '自动归档天数',
+                    hint: '0 = 关闭',
+                    enabled: _s.autoArchiveDays > 0,
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) {
+                      final n = int.tryParse(v);
+                      if (n != null && n >= 0) {
+                        _update((s) => s.copyWith(autoArchiveDays: n));
+                      }
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.delete_sweep_outlined,
+                title: '自动删除归档',
+                subtitle: '归档超过设定天数的对话自动永久删除',
+                value: _s.autoDeleteDays > 0,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(autoDeleteDays: v ? 90 : 0)),
+              ),
+              const SizedBox(height: 12),
+              Material(
+                color: _buttonColor(context),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: _projectInput(
+                    context: context,
+                    controller: _deleteCtrl,
+                    label: '自动删除天数',
+                    hint: '0 = 关闭',
+                    enabled: _s.autoDeleteDays > 0,
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) {
+                      final n = int.tryParse(v);
+                      if (n != null && n >= 0) {
+                        _update((s) => s.copyWith(autoDeleteDays: n));
+                      }
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  '锁定的对话不会被自动归档；手动归档/删除不受锁定影响。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              '导出包含：全部对话（含图片/附件）、提供方与模型、通用设置、'
-              '替换规则、提示词模板、MCP 配置。导入会合并到现有数据'
-              '（同 ID 对话覆盖）。',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
+          if (_exporting)
+            Positioned.fill(
+              child: Container(
+                color: Theme.of(
+                  context,
+                ).colorScheme.surface.withValues(alpha: 0.6),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(strokeWidth: 2.4),
+                      const SizedBox(height: 12),
+                      Text(
+                        '正在打包数据…',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 20),
-
-          _sectionLabel('归档'),
-          _switchTile(
-            context,
-            icon: Icons.archive_outlined,
-            title: '自动归档',
-            subtitle: '未活跃超过设定天数的对话自动归档（锁定的除外）',
-            value: _s.autoArchiveDays > 0,
-            onChanged: (v) =>
-                _update((s) => s.copyWith(autoArchiveDays: v ? 30 : 0)),
-          ),
-          const SizedBox(height: 12),
-          Material(
-            color: _buttonColor(context),
-            borderRadius: BorderRadius.circular(14),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: _projectInput(
-                context: context,
-                controller: _archiveCtrl,
-                label: '自动归档天数',
-                hint: '0 = 关闭',
-                enabled: _s.autoArchiveDays > 0,
-                keyboardType: TextInputType.number,
-                onChanged: (v) {
-                  final n = int.tryParse(v);
-                  if (n != null && n >= 0) {
-                    _update((s) => s.copyWith(autoArchiveDays: n));
-                  }
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          _switchTile(
-            context,
-            icon: Icons.delete_sweep_outlined,
-            title: '自动删除归档',
-            subtitle: '归档超过设定天数的对话自动永久删除',
-            value: _s.autoDeleteDays > 0,
-            onChanged: (v) =>
-                _update((s) => s.copyWith(autoDeleteDays: v ? 90 : 0)),
-          ),
-          const SizedBox(height: 12),
-          Material(
-            color: _buttonColor(context),
-            borderRadius: BorderRadius.circular(14),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: _projectInput(
-                context: context,
-                controller: _deleteCtrl,
-                label: '自动删除天数',
-                hint: '0 = 关闭',
-                enabled: _s.autoDeleteDays > 0,
-                keyboardType: TextInputType.number,
-                onChanged: (v) {
-                  final n = int.tryParse(v);
-                  if (n != null && n >= 0) {
-                    _update((s) => s.copyWith(autoDeleteDays: n));
-                  }
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              '锁定的对话不会被自动归档；手动归档/删除不受锁定影响。',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -4063,6 +4077,31 @@ class _ArchivedConversationsPageState
             ),
     );
   }
+}
+
+/// 导出打包（isolate）：convs/ + settings.json → ZIP 写临时文件
+/// 返回 ZIP 路径。全部同步 IO 在后台执行，主线程零阻塞
+String _zipBackupIsolate(Map<String, dynamic> args) {
+  final convsDir = Directory(args['convsDir'] as String);
+  final archive = Archive();
+  if (convsDir.existsSync()) {
+    for (final f in convsDir.listSync()) {
+      if (f is File && f.path.endsWith('.json')) {
+        final bytes = f.readAsBytesSync();
+        archive.addFile(
+          ArchiveFile('convs/${f.uri.pathSegments.last}', bytes.length, bytes),
+        );
+      }
+    }
+  }
+  final settingsBytes = utf8.encode(args['settingsJson'] as String);
+  archive.addFile(
+    ArchiveFile('settings.json', settingsBytes.length, settingsBytes),
+  );
+  final zipBytes = ZipEncoder().encode(archive);
+  final outPath = args['outPath'] as String;
+  File(outPath).writeAsBytesSync(zipBytes, flush: true);
+  return outPath;
 }
 
 /// 相对时间（归档卡片用）：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期

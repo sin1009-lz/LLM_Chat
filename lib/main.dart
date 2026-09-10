@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert'
     show base64Decode, base64Encode, jsonDecode, jsonEncode, utf8;
-import 'dart:io' show Directory, File;
+import 'dart:io'
+    show Directory, File, HttpServer, InternetAddress, HttpRequest;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'dart:ui' show ImageFilter;
@@ -25,6 +26,7 @@ import 'package:photo_view/photo_view.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:screen_corner_radius/screen_corner_radius.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 import 'chat.dart';
 import 'general_settings.dart';
@@ -53,12 +55,13 @@ ModelKey? _decodeModelKey(String s) {
 }
 
 /// 品牌色：亮色模式与暗色模式各一份
-/// 品牌色：中性石墨/银灰体系（彻底无蓝紫）
-const Color kBrandColorLight = Color(0xFF424942);
+/// 蓝灰种子（Blue-Grey）：fromSeed 的 M3 色调映射会把它映射到蓝灰 primary，
+/// 加载转圈/光标等主题色不再是绿色
+const Color kBrandColorLight = Color(0xFF455A64);
 
 /// 用户消息气泡专用蓝（仅气泡，不参与全局主题种子）
 const Color kUserBubbleColor = Color(0xFF3D5AFE);
-const Color kBrandColorDark = Color(0xFFB8BCB8);
+const Color kBrandColorDark = Color(0xFF90A4AE);
 
 /// 页面过渡：新页面从右滑入覆盖，前页面保持原位不动
 /// （不左移、不缩小、不变透明——去掉 iOS 风格旧页左移效果）
@@ -1070,6 +1073,7 @@ class _HomePageState extends State<HomePage>
   static const kBuiltinTimeTool = 'builtin__get_current_time';
   static const kBuiltinLocationTool = 'builtin__get_location';
   static const kBuiltinSearchTool = 'builtin__web_search';
+  static const kBuiltinPythonTool = 'builtin__run_python';
 
   /// 内置工具开关（当前对话生效值：会话级 ?? 全局）
   bool get _builtinToolsEffective {
@@ -1110,6 +1114,7 @@ class _HomePageState extends State<HomePage>
         if (_general.builtinTimeEnabled) _builtinToolDefs[0],
         if (_general.builtinLocationEnabled) _builtinToolDefs[1],
         if (_general.builtinSearchEnabled) _builtinToolDefs[2],
+        if (_general.builtinPythonEnabled) _builtinToolDefs[3],
       ]);
     }
     // 会话级 MCP 配置：null = 跟随全局（所有 enabled）；非 null = 仅该会话启用的 id
@@ -1148,6 +1153,7 @@ class _HomePageState extends State<HomePage>
   /// - 获取当前时间（含时区）
   /// - 获取设备地理位置（经纬度，需定位权限）
   /// - 联网搜索（DeepSeek Anthropic 兼容端点原生 web_search 服务端工具）
+  /// - 运行 Python（本地 Pyodide 沙箱，支持 matplotlib 产图）
   static final List<Map<String, dynamic>> _builtinToolDefs = [
     {
       'type': 'function',
@@ -1183,6 +1189,28 @@ class _HomePageState extends State<HomePage>
             'query': {'type': 'string', 'description': '搜索查询词（简明扼要，一次搜索一个主题）'},
           },
           'required': ['query'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': kBuiltinPythonTool,
+        'description':
+            '在设备本地沙箱中运行 Python 代码（Pyodide，含 numpy/pandas/matplotlib/'
+            'scipy/sympy 等科学计算包，无需网络即可用）。代码的 stdout 输出和最后 '
+            '表达式结果会返回给你；matplotlib 生成的图表会直接展示给用户。'
+            '涉及数学计算、数据处理与分析、文件内容解析、画图/可视化、逻辑验证时'
+            '调用。请在代码中用 print() 输出关键结果。变量在多次调用间保留。',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'code': {
+              'type': 'string',
+              'description': '要执行的完整 Python 代码（可直接运行的完整脚本）',
+            },
+          },
+          'required': ['code'],
         },
       },
     },
@@ -1245,6 +1273,209 @@ class _HomePageState extends State<HomePage>
       return _webSearch(query);
     }
     return '未知的内置工具：$name';
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Python 执行内核（Pyodide in WebView，本地环回 HTTP 服务）
+  //
+  // appassets 协议给 .js 返回 application/octet-stream，Pyodide 的
+  // 动态 import() 因 MIME 不合法拒绝加载——改由 127.0.0.1 环回
+  // HttpServer 以正确 MIME 提供 assets/pyodide/ 预捆绑运行时与
+  // kernel 页面；未捆绑的包文件（numpy 等由 loadPackagesFromImports
+  // 按需拉取）回源 jsdelivr CDN 并落盘缓存，二次使用零流量
+  // ──────────────────────────────────────────────────────────────
+  HttpServer? _pyServer;
+  WebViewController? _pyKernel;
+  Future<void>? _pyKernelBoot;
+  int _nextPyId = 1;
+  final Map<int, Completer<({String text, List<String> images})>> _pyPending =
+      {};
+
+  static const Map<String, String> _pyMimes = {
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.wasm': 'application/wasm',
+    '.zip': 'application/zip',
+    '.json': 'application/json; charset=utf-8',
+    '.html': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.data': 'application/octet-stream',
+    '.whl': 'application/octet-stream',
+  };
+
+  Future<void> _ensurePyServer() async {
+    if (_pyServer != null) return;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    _pyServer = server;
+    server.listen((req) async {
+      await _pyServeAsset(req);
+    });
+  }
+
+  Future<void> _pyServeAsset(HttpRequest req) async {
+    try {
+      var path = req.uri.path;
+      if (path == '/' || path == '/kernel.html') path = '/python_kernel.html';
+      if (path.contains('..')) {
+        req.response.statusCode = 404;
+        await req.response.close();
+        return;
+      }
+      // 1. 预捆绑资产（核心运行时 + kernel 页）：本地即时返回
+      try {
+        final data = await rootBundle.load('assets$path');
+        _pyReply(req, data.buffer.asUint8List(
+            data.offsetInBytes, data.lengthInBytes), path);
+        return;
+      } catch (_) {}
+      // 2. 磁盘缓存（此前回源过的包文件）
+      final cacheDir = Directory(
+        '${(await getApplicationDocumentsDirectory()).path}/pyodide_cache',
+      );
+      final cached = File('${cacheDir.path}$path');
+      if (await cached.exists()) {
+        _pyReply(req, await cached.readAsBytes(), path);
+        return;
+      }
+      // 3. 回源 CDN（仅 /pyodide/ 下的包文件）→ 落盘缓存
+      if (path.startsWith('/pyodide/')) {
+        final res = await http
+            .get(Uri.parse(
+              'https://cdn.jsdelivr.net/pyodide/v0.28.3/full${path.substring('/pyodide'.length)}',
+            ))
+            .timeout(const Duration(seconds: 30));
+        if (res.statusCode == 200) {
+          await cached.create(recursive: true);
+          await cached.writeAsBytes(res.bodyBytes, flush: true);
+          _pyReply(req, res.bodyBytes, path);
+          return;
+        }
+      }
+      req.response.statusCode = 404;
+      await req.response.close();
+    } catch (_) {
+      try {
+        req.response.statusCode = 404;
+        await req.response.close();
+      } catch (_) {}
+    }
+  }
+
+  void _pyReply(HttpRequest req, List<int> bytes, String path) {
+    final dot = path.lastIndexOf('.');
+    req.response.headers.set(
+      'Content-Type',
+      dot < 0 ? 'application/octet-stream' : (_pyMimes[path.substring(dot)] ?? 'application/octet-stream'),
+    );
+    req.response.headers.set('Access-Control-Allow-Origin', '*');
+    req.response.add(bytes);
+    req.response.close();
+  }
+
+  /// 启动（或复用）隐藏 WebView 中的 Python 内核。Pyodide 运行时
+  /// 在首次 runPython 时才真正加载（冷启动约 10 秒），页面就绪即可。
+  /// 失败时清空引导锁，下次调用重试
+  Future<void> _ensurePyKernel() => _pyKernelBoot ??= () async {
+    try {
+      await _ensurePyServer();
+      final c = WebViewController()
+        ..setJavaScriptMode(JavaScriptMode.unrestricted)
+        ..addJavaScriptChannel('pyDone', onMessageReceived: (m) {
+          Map<String, dynamic> j;
+          try {
+            j = jsonDecode(m.message) as Map<String, dynamic>;
+          } catch (_) {
+            return;
+          }
+          final done = _pyPending.remove(j['id'] as int? ?? -1);
+          if (done == null || done.isCompleted) return;
+          final ok = j['ok'] as bool? ?? false;
+          final aborted = j['aborted'] as bool? ?? false;
+          final out = (j['stdout'] as String? ?? '').trimRight();
+          final err = (j['stderr'] as String? ?? '').trimRight();
+          final res = (j['result'] as String? ?? '').trimRight();
+          final error = (j['error'] as String? ?? '').trim();
+          // matplotlib 图：kernel 回传裸 base64（PNG）
+          final imgs = (j['images'] as List? ?? const [])
+              .whereType<String>()
+              .toList();
+          var text = <String>[
+            if (out.isNotEmpty) out,
+            if (res.isNotEmpty) '[结果] $res',
+            if (err.isNotEmpty) '[stderr] $err',
+            if (!ok && error.isNotEmpty) '[错误] $error',
+            if (aborted) '[已中止]',
+          ].join('\n');
+          if (imgs.isNotEmpty) {
+            text +=
+                '${text.isEmpty ? '' : '\n'}[已生成 ${imgs.length} 张图表，点击工具卡片查看]';
+          }
+          if (text.isEmpty) text = '(无输出)';
+          done.complete((text: text, images: imgs));
+        });
+      // 先挂树（setState → 隐藏 WebViewWidget 进入 Stack，渲染出原生
+      // 视图），再加载页面——未挂树直接 load 会静默不执行
+      _pyKernel = c;
+      if (mounted) setState(() {});
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      await c.loadRequest(
+        Uri.parse('http://127.0.0.1:${_pyServer!.port}/kernel.html'),
+      );
+      // 等页面脚本就绪（最多 15 秒；runPython 定义即回 true）
+      for (var i = 0; i < 150; i++) {
+        try {
+          final r = await c.runJavaScriptReturningResult(
+            'typeof runPython === "function"',
+          );
+          if (r.toString() == 'true') break;
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    } catch (_) {
+      // 引导失败：允许下次重试
+      _pyKernelBoot = null;
+      _pyKernel = null;
+      rethrow;
+    }
+  }();
+
+  /// 执行 Python 代码：内核就绪 → 注入代码 → 等 pyDone 回传。
+  /// 内部 105s 超时（外层调度 120s 兜底），超时经 __pyAbort 中断
+  Future<({String text, List<String> images})> _runPythonCode(
+    String code,
+  ) async {
+    await _ensurePyKernel();
+    final k = _pyKernel;
+    if (k == null) {
+      return (text: 'Python 内核未就绪', images: const <String>[]);
+    }
+    final id = _nextPyId++;
+    final done = Completer<({String text, List<String> images})>();
+    _pyPending[id] = done;
+    try {
+      // jsonEncode 产出合法 JS 字符串字面量（转义引号/换行/反斜杠）
+      await k.runJavaScript('runPython($id, ${jsonEncode(code)})');
+      return await done.future.timeout(
+        const Duration(seconds: 105),
+        onTimeout: () {
+          _pyPending.remove(id);
+          try {
+            k.runJavaScript('window.__pyAbort && window.__pyAbort($id)');
+          } catch (_) {}
+          return (
+            text: 'Python 执行超时（105 秒），已中止；死循环代码请加合理出口',
+            images: const <String>[],
+          );
+        },
+      );
+    } catch (e) {
+      _pyPending.remove(id);
+      if (!done.isCompleted) {
+        done.complete((text: 'Python 内核错误：$e', images: const <String>[]));
+      }
+      return (text: 'Python 内核错误：$e', images: const <String>[]);
+    }
   }
 
   /// DeepSeek 原生联网搜索（Anthropic 兼容端点 + web_search_20250305
@@ -1552,17 +1783,39 @@ class _HomePageState extends State<HomePage>
           try {
             if (call.name.startsWith('builtin__')) {
               final args = _parseArgs(call.args);
-              resultText =
-                  await _execBuiltinTool(
-                    call.name,
-                    query: (args['query'] as String?) ?? '',
-                  ).timeout(
-                    // 内置工具整体超时（位置工具含权限弹窗 + 定位，需留足时间）
-                    const Duration(seconds: 35),
-                    onTimeout: () => '内置工具调用超时（35 秒），请稍后重试',
-                  );
-              resultText = resultText.isEmpty ? '(空结果)' : resultText;
-              resultCode = resultText.length;
+              if (call.name == kBuiltinPythonTool) {
+                // Python：code 参数（兼容 query 槽位），120s 整体超时
+                //（含首次 WASM 内核启动 ~10s 与自动装包）；产图挂卡片
+                final r = await _runPythonCode(
+                  (args['code'] as String?) ??
+                      (args['query'] as String?) ??
+                      '',
+                ).timeout(
+                  const Duration(seconds: 120),
+                  onTimeout: () => (
+                    text: 'Python 执行超时（120 秒，含内核启动/装包），已中止',
+                    images: const <String>[],
+                  ),
+                );
+                resultText = r.text.isEmpty ? '(空结果)' : r.text;
+                card.output = resultText.length > 4000
+                    ? '${resultText.substring(0, 4000)}…'
+                    : resultText;
+                card.images = r.images.isNotEmpty ? List.of(r.images) : null;
+                resultCode = resultText.length;
+              } else {
+                resultText =
+                    await _execBuiltinTool(
+                      call.name,
+                      query: (args['query'] as String?) ?? '',
+                    ).timeout(
+                      // 内置工具整体超时（位置工具含权限弹窗 + 定位，需留足时间）
+                      const Duration(seconds: 35),
+                      onTimeout: () => '内置工具调用超时（35 秒），请稍后重试',
+                    );
+                resultText = resultText.isEmpty ? '(空结果)' : resultText;
+                resultCode = resultText.length;
+              }
             } else {
               final server = toolDef!.$1;
               final client = _mcpClients[server.id]!;
@@ -3492,6 +3745,7 @@ class _HomePageState extends State<HomePage>
     // 输入栏顶边高度变化（多行增高/收起）反映在列表 padding → 布局 →
     // ChatScrollPosition.correctForNewDimensions 统一处理（贴底/上翻补偿），
     // 无需额外监听器
+    _warmUpDrawerShaders();
     // 从系统获取屏幕圆角（Android 12+ getRoundedCorner）
     // 部分设备只对个别角返回值或返回 0：取四角最大值，0 时保留默认 28
     ScreenCornerRadius.get().then((r) {
@@ -3665,6 +3919,19 @@ class _HomePageState extends State<HomePage>
   /// 系统内存紧张（onTrimMemory / lowMemory）：释放三层缓存——
   /// 解码图片、消息图片 provider、显示层规则文本；数据本体
   /// （会话/消息）不受影响，需要时按需重建
+  /// 抽屉动画 shader 预热：首帧后把控制器推到 ε 再归零——
+  /// 离屏编译平移/裁剪/渐变合成的 shader 管线（Impeller 首次
+  /// 执行新管线组合时的编译卡顿 = 首次开抽屉掉帧）
+  void _warmUpDrawerShaders() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _drawerController.value = 0.001;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _drawerController.value = 0;
+      });
+    });
+  }
+
   @override
   void didHaveMemoryPressure() {
     PaintingBinding.instance.imageCache.clear();
@@ -3914,6 +4181,19 @@ class _HomePageState extends State<HomePage>
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
           ),
         ),
+        // ── Python 内核宿主：2×2 像素 WebView 负坐标移出视口 ──
+        // WebView 必须挂树才会加载执行；零尺寸会挂起，故用最小尺寸 +
+        // 移出可见区（不吃光栅资源，见启动 OOM 教训）
+        if (_pyKernel != null)
+          Positioned(
+            left: -2,
+            top: -2,
+            child: SizedBox(
+              width: 2,
+              height: 2,
+              child: IgnorePointer(child: WebViewWidget(controller: _pyKernel!)),
+            ),
+          ),
       ],
     );
 
@@ -3930,6 +4210,31 @@ class _HomePageState extends State<HomePage>
             Positioned.fill(
               child: RepaintBoundary(child: _buildDrawer(topPad: topPad)),
             ),
+            // 抽屉右缘投影：挂在静止的抽屉层上——一次绘制、零逐帧开销，
+            // 主页面滑动全程保持阴影（画在移动的主页面上则 blur 随位移
+            // 每帧重算，是滑动掉帧主因）
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              width: 28,
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerRight,
+                      end: Alignment.centerLeft,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.30),
+                        Colors.black.withValues(alpha: 0.12),
+                        Colors.transparent,
+                      ],
+                      stops: const [0, 0.4, 1],
+                    ),
+                  ),
+                ),
+              ),
+            ),
 
             // ── 主页面：右滑 → 右移 + 缩小 + 圆角 + 变暗变模糊 ──
             // 动画期间仅重建受进度 t 影响的部分（变换/投影/变暗遮罩），
@@ -3942,36 +4247,29 @@ class _HomePageState extends State<HomePage>
                 // 不缩放：只平移（避免大纹理每帧重采样开销 + 视觉更简洁）
                 return Transform.translate(
                   offset: Offset(shift, 0),
-                  // 主页面底部投影（悬浮感）：参数固定（不随动画进度变化）——
-                  // 若 alpha 变化，blurRadius 24 的模糊每帧重算导致卡顿
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(radius),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.3),
-                          blurRadius: 24,
-                          offset: const Offset(0, 10),
+                  // 投影由抽屉右缘的静止渐变条提供（见根 Stack）——
+                  // 移动的主页面上不画任何阴影（全屏 blur 随位移每帧
+                  // 重算是滑动掉帧主因）
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(radius),
+                    child: Stack(
+                      children: [
+                        // 主页面不透明底（缩放/圆角时不透出下层抽屉内容）
+                        Container(
+                          color: Theme.of(context).scaffoldBackgroundColor,
                         ),
-                      ],
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(radius),
-                      child: Stack(
-                        children: [
-                          // 主页面不透明底（缩放/圆角时不透出下层抽屉内容）
-                          Container(
-                            color: Theme.of(context).scaffoldBackgroundColor,
-                          ),
-                          child!,
-                          // 半透明变暗遮罩（随进度渐变，无模糊）
-                          IgnorePointer(
+                        child!,
+                        // 半透明变暗遮罩（随进度渐变，无模糊）：
+                        // 独立 RepaintBoundary——每帧只重画这块全屏色块
+                        // 层，不脏主页面 Stack 的其他内容
+                        RepaintBoundary(
+                          child: IgnorePointer(
                             child: Container(
                               color: Colors.black.withValues(alpha: tt * 0.35),
                             ),
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
                 );
@@ -5388,7 +5686,7 @@ class _HomePageState extends State<HomePage>
                 Text(
                   running ? '调用中…' : '完成 ${tcs.length} 个工具',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: running ? grey : Colors.green.shade600,
+                    color: running ? grey : kSuccessColor,
                   ),
                 ),
               ],
@@ -5402,12 +5700,16 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  /// 工具调用单行：状态图标 + 名称/参数 + 结果
+  /// 工具调用单行：状态图标 + 名称/参数 + 结果字符数；
+  /// 带输出/产图的工具（Python）可点击展开详情
   Widget _toolRow(BuildContext context, ToolCallRecord tc) {
     final grey = Colors.grey.shade700;
     final running = tc.resultCount == null;
     final failed = tc.resultCount != null && tc.resultCount! < 0;
-    return Padding(
+    final imgs = tc.images ?? const <String>[];
+    final hasDetail =
+        (tc.output?.isNotEmpty ?? false) || imgs.isNotEmpty;
+    final body = Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -5422,7 +5724,7 @@ class _HomePageState extends State<HomePage>
             Icon(
               failed ? Icons.error_outline : Icons.check_circle_outline,
               size: 14,
-              color: failed ? Colors.redAccent : Colors.green.shade600,
+              color: failed ? Colors.redAccent : kSuccessColor,
             ),
           const SizedBox(width: 8),
           Expanded(
@@ -5435,6 +5737,20 @@ class _HomePageState extends State<HomePage>
               ).textTheme.bodySmall?.copyWith(color: grey),
             ),
           ),
+          if (imgs.isNotEmpty) ...[
+            Icon(
+              Icons.image_outlined,
+              size: 13,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(width: 2),
+            Text(
+              '${imgs.length}',
+              style: Theme.of(
+                context,
+              ).textTheme.labelSmall?.copyWith(color: grey),
+            ),
+          ],
           if (!running && !failed)
             Padding(
               padding: const EdgeInsets.only(left: 8),
@@ -5443,6 +5759,92 @@ class _HomePageState extends State<HomePage>
                 style: Theme.of(
                   context,
                 ).textTheme.labelSmall?.copyWith(color: grey),
+              ),
+            ),
+          if (hasDetail)
+            Icon(
+              tc.expanded ? Icons.expand_less : Icons.expand_more,
+              size: 16,
+              color: grey,
+            ),
+        ],
+      ),
+    );
+    if (!hasDetail) return body;
+    // 展开/收起：HomePage.setState → _MessageItem 签名失效 → 真实重建
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          onTap: () => setState(() => tc.expanded = !tc.expanded),
+          borderRadius: BorderRadius.circular(kRadiusXs),
+          child: body,
+        ),
+        if (tc.expanded) _toolDetail(context, tc),
+      ],
+    );
+  }
+
+  /// 工具详情（展开态）：完整输出（等宽可滚动可选择）+ 产图横滑列表
+  Widget _toolDetail(BuildContext context, ToolCallRecord tc) {
+    final imgs = tc.images ?? const <String>[];
+    return Padding(
+      padding: const EdgeInsets.only(left: 22, top: 2, bottom: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (tc.output?.isNotEmpty ?? false)
+            Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(maxHeight: 240),
+              margin: EdgeInsets.only(bottom: imgs.isEmpty ? 0 : 8),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Theme.of(
+                  context,
+                ).colorScheme.onSurface.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(kRadiusSm),
+              ),
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  tc.output!,
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    height: 1.45,
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.onSurface.withValues(alpha: 0.85),
+                  ),
+                ),
+              ),
+            ),
+          if (imgs.isNotEmpty)
+            SizedBox(
+              height: 165,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: imgs.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
+                itemBuilder: (context, i) => GestureDetector(
+                  // 点击产图 → 全屏查看（复用聊天图片缓存 provider）
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          _ImageFullscreen(image: _imageProviderFor(imgs[i])),
+                    ),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(kRadiusSm),
+                    child: Image(
+                      image: _imageProviderFor(imgs[i]),
+                      width: 220,
+                      height: 165,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                    ),
+                  ),
+                ),
               ),
             ),
         ],
@@ -7534,7 +7936,7 @@ class _MessageItemState extends State<_MessageItem> {
       (widget.message.fileParts?.length ?? 0) * 9901 +
       (widget.message.toolCalls?.fold<int>(
             0,
-            (a, t) => a * 31 + (t.resultCount ?? -1000),
+            (a, t) => a * 31 + (t.resultCount ?? -1000) + (t.expanded ? 7 : 0),
           ) ??
           0) +
       widget.epoch * 1000003;

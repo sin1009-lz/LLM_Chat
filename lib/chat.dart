@@ -382,7 +382,14 @@ McpServer? _mcpServerFromMap(
 /// 工具调用记录（消息卡片展示）：工具名 + 参数摘要 + 结果状态。
 /// 随消息持久化，历史重放可见
 class ToolCallRecord {
-  ToolCallRecord({required this.name, required this.query, this.resultCount});
+  ToolCallRecord({
+    required this.name,
+    required this.query,
+    this.resultCount,
+    this.output,
+    this.images,
+    this.expanded = false,
+  });
 
   final String name;
 
@@ -392,16 +399,31 @@ class ToolCallRecord {
   /// 结果状态：null = 进行中；-1 = 失败；>=0 = 成功（结果字符数）
   int? resultCount;
 
+  /// 运行输出（Python 工具：stdout/结果摘要；持久化截断 4000 字符）
+  String? output;
+
+  /// 运行产图（matplotlib 等）：data URL 列表。瞬态不序列化——
+  /// 重载会话后消失（同 mermaid 缓存语义）
+  List<String>? images;
+
+  /// 卡片展开态（显示完整输出/图片；瞬态）
+  bool expanded;
+
   Map<String, dynamic> toJson() => {
     'name': name,
     'query': query,
     'resultCount': resultCount,
+    if (output != null && output!.isNotEmpty)
+      'output': output!.length > 4000
+          ? '${output!.substring(0, 4000)}…'
+          : output,
   };
 
   factory ToolCallRecord.fromJson(Map<String, dynamic> j) => ToolCallRecord(
     name: j['name'] as String? ?? '',
     query: j['query'] as String? ?? '',
     resultCount: j['resultCount'] as int?,
+    output: j['output'] as String?,
   );
 }
 

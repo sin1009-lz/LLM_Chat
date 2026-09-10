@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="pyodide/pyodide.js"></script>
+<style>
+  html, body { margin: 0; background: transparent; }
+</style>
+</head>
+<body>
+<script>
+  // Python 内核（Pyodide = WASM CPython）：由 Flutter 隐藏 WebView 加载，
+  // 执行 AI 通过 builtin__run_python 工具提交的代码。stdout/stderr 实时
+  // 捕获，结束后经 pyDone 通道回传；执行超时由 Dart 侧控制（中断协议：
+  // 收到 abort 标记时终止本次等待）。
+  let pyodideReady = null;
+  let pyodide = null;
+  // 中断协议：Dart 调 window.__pyAbort(id) 置位本次任务的 abort 标记
+  window.__pyAbort = function(id) { abortedIds.add(id); };
+  const abortedIds = new Set();
+
+  function ensurePyodide() {
+    if (pyodideReady) return pyodideReady;
+    pyodideReady = (async () => {
+      pyodide = await loadPyodide({
+        // 同源 HTTP 服务（127.0.0.1）提供 /pyodide/，相对路径即可
+        indexURL: 'pyodide/',
+      });
+      return pyodide;
+    })();
+    return pyodideReady;
+  }
+
+  async function runPython(id, code) {
+    let out = '', err = '';
+    const reply = (obj) => {
+      try { pyDone.postMessage(JSON.stringify(obj)); } catch (e) {}
+    };
+    try {
+      await ensurePyodide();
+      if (abortedIds.has(id)) { abortedIds.delete(id); return reply({ id, aborted: true }); }
+      pyodide.setStdout({ batched: (s) => { out += s + '\n'; } });
+      pyodide.setStderr({ batched: (s) => { err += s + '\n'; } });
+      // 自动装包：扫描 import 语句，已知预编译包（numpy/pandas 等）
+      // 按需加载；本地没有的经 HTTP 服务回源 CDN 并缓存。纯 Python
+      // 未知包交 micropip（需网络）。加载失败不阻塞——留给 import 报错
+      try { await pyodide.loadPackagesFromImports(code); } catch (e) {}
+      let result = null;
+      // 用户全局变量持久化（多轮迭代可复用之前定义的变量/函数）
+      const globals = pyodide.globals.get('_llmui_g');
+      const g = globals ? pyodide.toPy({}) : null;
+      try {
+        result = await pyodide.runPythonAsync(code);
+      } finally {
+        if (g) g.destroy();
+      }
+      const resultStr = result === undefined || result === null
+        ? ''
+        : String(result);
+      if (abortedIds.has(id)) { abortedIds.delete(id); return reply({ id, aborted: true }); }
+      // 图形收割：打开的 matplotlib figure → PNG base64（用户可见，
+      // 不进模型上下文）。限制 4 张防内存失控
+      let images = [];
+      try {
+        const figs = pyodide.runPython(`
+import base64, io
+def _llmui_figs():
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return []
+    outs = []
+    for n in plt.get_fignums():
+        f = plt.figure(n)
+        b = io.BytesIO()
+        f.savefig(b, format='png', dpi=110, bbox_inches='tight')
+        outs.append(base64.b64encode(b.getvalue()).decode())
+    plt.close('all')
+    return outs[:4]
+_llmui_figs()
+`);
+        const js = figs && figs.toJs ? figs.toJs() : figs;
+        if (Array.isArray(js)) images = js;
+        if (figs && figs.destroy) figs.destroy();
+      } catch (e) {}
+      reply({
+        id, ok: true,
+        stdout: out.length > 20000 ? out.slice(0, 20000) + '\n…(截断)' : out,
+        stderr: err.length > 10000 ? err.slice(0, 10000) + '\n…(截断)' : err,
+        result: resultStr.length > 5000 ? resultStr.slice(0, 5000) + '…(截断)' : resultStr,
+        images: images,
+      });
+    } catch (e) {
+      reply({
+        id, ok: false,
+        stdout: out,
+        error: String(e && e.message || e).slice(0, 5000),
+      });
+    }
+  }
+</script>
+</body>
+</html>
