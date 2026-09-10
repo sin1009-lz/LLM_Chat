@@ -29,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'chat.dart';
+import 'doc_extract.dart';
 import 'general_settings.dart';
 import 'ui_tokens.dart';
 import 'markdown_view.dart';
@@ -837,13 +838,56 @@ class _HomePageState extends State<HomePage>
     for (final att in _attachments) {
       if (att.loading) continue; // 压缩占位不进消息
       if (!att.isImage) {
-        // PDF 解析为图像（通用设置开启时）：渲染每页为 PNG 图片，
-        // 多模态模型可直接查看内容；失败/无页 → 降级为文件名
-        if (_general.pdfAsImage && att.name.toLowerCase().endsWith('.pdf')) {
+        // PDF：多模态模型 + 「PDF 转图」开启 → 渲染成图（模型直接看
+        // 版面/图表）；否则提取文本层（扫描版无文本层 → 文件名占位）
+        if (att.name.toLowerCase().endsWith('.pdf')) {
+          if (_general.pdfAsImage && _modelSupportsMultimodal) {
+            try {
+              final parts = await _pdfToImages(att);
+              if (parts.isNotEmpty) {
+                imageParts.addAll(parts);
+                continue;
+              }
+            } catch (_) {}
+          }
           try {
-            final parts = await _pdfToImages(att);
-            if (parts.isNotEmpty) {
-              imageParts.addAll(parts);
+            final (text, truncated) = await _pdfToText(att);
+            if (text.trim().isNotEmpty) {
+              fileParts.add(
+                MessageFilePart(
+                  name: att.name,
+                  size: att.size ?? 0,
+                  content: text,
+                  truncated: truncated,
+                ),
+              );
+              if (truncated) _toast('${att.name} 内容较长，已截断');
+              continue;
+            }
+          } catch (_) {}
+          nameParts.add(att.name);
+          continue;
+        }
+        // Office 文档（docx/xlsx/pptx）：本地解包提取文本（compute
+        // 隔离，Cherry Studio/ChatBox 同方案——OpenAI 兼容端点没有
+        // 文件上传 API，只能文本注入）；解析失败 → 文件名占位
+        if (isDocAttachmentName(att.name)) {
+          try {
+            final bytes = await att.readBytes();
+            if (bytes.isNotEmpty) {
+              final (content, truncated) = await parseDocumentAttachment(
+                att.name,
+                bytes,
+              );
+              fileParts.add(
+                MessageFilePart(
+                  name: att.name,
+                  size: att.size ?? 0,
+                  content: content,
+                  truncated: truncated,
+                ),
+              );
+              if (truncated) _toast('${att.name} 内容较长，已截断');
               continue;
             }
           } catch (_) {}
@@ -1038,6 +1082,33 @@ class _HomePageState extends State<HomePage>
         }
       }
       return parts;
+    } finally {
+      doc.dispose();
+    }
+  }
+
+  /// 将 PDF 附件提取为文本（pdfrx 文本层，最多前 50 页，超长截断）。
+  /// pdfium 对象不能跨 isolate，主 isolate 执行（常规文档速度可接受）；
+  /// 扫描版 PDF 无文本层 → 返回空串，由调用方降级为文件名占位
+  Future<(String, bool)> _pdfToText(_Attachment att) async {
+    final p = att.path;
+    if (p == null || p.isEmpty) return ('', false);
+    final doc = await PdfDocument.openFile(p);
+    try {
+      final count = math.min(doc.pages.length, 50);
+      final sb = StringBuffer();
+      for (var i = 0; i < count; i++) {
+        final t = await doc.pages[i].loadText();
+        sb.writeln(t.fullText);
+        if (sb.length > kMaxDocExtractChars) break;
+      }
+      var text = sb.toString().trim();
+      var truncated = false;
+      if (text.length > kMaxDocExtractChars) {
+        text = text.substring(0, kMaxDocExtractChars);
+        truncated = true;
+      }
+      return (text, truncated);
     } finally {
       doc.dispose();
     }
@@ -6733,17 +6804,27 @@ class _AttachmentBar extends StatelessWidget {
   /// 文件卡片（llama.cpp 风格横排）：文件图标 + 文件名 + 大小两行
   Widget _fileIcon(BuildContext context, _Attachment att) {
     final isText = isTextAttachmentName(att.name);
+    final lower = att.name.toLowerCase();
+    final isDoc = isDocAttachmentName(att.name);
+    // 文档按类型分图标：xlsx 表格 / pptx 幻灯片 / docx 文档
+    final icon = isText
+        ? Icons.text_snippet_outlined
+        : lower.endsWith('.xlsx')
+        ? Icons.table_chart_outlined
+        : lower.endsWith('.pptx')
+        ? Icons.slideshow_outlined
+        : isDoc
+        ? Icons.description_outlined
+        : lower.endsWith('.pdf')
+        ? Icons.picture_as_pdf_outlined
+        : Icons.insert_drive_file;
     final scheme = Theme.of(context).colorScheme;
     return Container(
       color: scheme.surfaceContainerHighest,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Row(
         children: [
-          Icon(
-            isText ? Icons.text_snippet_outlined : Icons.insert_drive_file,
-            size: 18,
-            color: scheme.onSurfaceVariant,
-          ),
+          Icon(icon, size: 18, color: scheme.onSurfaceVariant),
           const SizedBox(width: 8),
           Expanded(
             child: Column(
