@@ -759,21 +759,8 @@ class _HomePageState extends State<HomePage>
 
   /// 滚动通知：跟踪用户手指拖动（当前无抢滚动逻辑，保留供调试）
   bool _onScrollNotification(ScrollNotification n) {
-    // 主列表（depth 0）滚动状态跟踪：滚动中降级页眉/输入栏的玻璃
-    //（BackdropFilter 对滚动内容每帧重采样是 GPU 大头——"不卡顿但
-    // 不丝滑"的来源；思考块等内层滚动 depth>0 不触发）
-    if (n.depth == 0) {
-      if (n is ScrollStartNotification) {
-        _listScrollActive.value = true;
-      } else if (n is ScrollEndNotification) {
-        _listScrollActive.value = false;
-      }
-    }
     return false;
   }
-
-  /// 主列表正在滚动（页眉/输入栏玻璃降级开关）
-  final ValueNotifier<bool> _listScrollActive = ValueNotifier(false);
 
   ChatStore? _store;
 
@@ -4083,7 +4070,6 @@ class _HomePageState extends State<HomePage>
     WidgetsBinding.instance.removeObserver(this);
     _streamTick.dispose();
     _inputBarAnimatedTop.dispose();
-    _listScrollActive.dispose();
     _tts?.stop();
     _streamSub?.cancel();
     _maintainTimer?.cancel();
@@ -4253,7 +4239,6 @@ class _HomePageState extends State<HomePage>
                 onNewConversation: _newConversation,
                 onOpenProvidersSettings: () =>
                     _openSettings(section: SettingsSection.providers),
-                scrollActiveListenable: _listScrollActive,
               ),
             ),
           ],
@@ -4287,7 +4272,6 @@ class _HomePageState extends State<HomePage>
             onAddFile: _pickFiles,
             containerTopNotifier: _inputBarTop,
             animatedTopNotifier: _inputBarAnimatedTop,
-            scrollActiveListenable: _listScrollActive,
             isResponding: _isResponding,
             onSend: _onSend,
             onStop: _onStop,
@@ -6960,7 +6944,6 @@ class _GlassInputBar extends StatefulWidget {
     required this.onAddFile,
     required this.containerTopNotifier,
     required this.animatedTopNotifier,
-    required this.scrollActiveListenable,
     required this.onSend,
     required this.isResponding,
     required this.onStop,
@@ -6996,9 +6979,6 @@ class _GlassInputBar extends StatefulWidget {
   /// 上报输入栏容器【动画中】的真实高度（布局阶段被动逐帧测量；
   /// 附件条跟随容器动画用，与 containerTopNotifier 的目标值互不干扰）
   final ValueNotifier<double> animatedTopNotifier;
-
-  /// 主列表滚动中（true 时输入栏玻璃降级为纯色，见 build 注释）
-  final ValueListenable<bool> scrollActiveListenable;
 
   /// 发送消息（文本 + 附件名列表）；由 HomePage 处理实际对话逻辑
   final void Function(String text, List<String> attachmentNames) onSend;
@@ -7230,46 +7210,20 @@ class _GlassInputBarState extends State<_GlassInputBar> {
           left: _hMargin,
           right: _hMargin,
         ),
-        // 输入栏容器。滚动降级：主列表滚动中玻璃切纯色替身
-        //（BackdropFilter 对滚动内容每帧重采样是 GPU 大头），
-        // 交叉淡入淡出无跳变，停止后淡回玻璃
-        child: ValueListenableBuilder<bool>(
-          valueListenable: widget.scrollActiveListenable,
-          builder: (context, active, child) => AnimatedSwitcher(
-            duration: const Duration(milliseconds: 140),
-            child: active
-                ? DecoratedBox(
-                    key: const ValueKey('solid'),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).brightness == Brightness.dark
-                          ? const Color(0xEE1C1C1E)
-                          : const Color(0xEEF7F7F7),
-                      borderRadius: BorderRadius.circular(_radius),
-                    ),
-                    child: child!,
-                  )
-                : CupertinoLiquidGlass(
-                    key: const ValueKey('glass'),
-                    blurSigma: 10, // 更模糊一点
-                    // tint 透明度：亮色 0.28（默认）、暗色 0.12——保持玻璃半透明，
-                    // 过高（0.6）会变成白色实色
-                    tintOpacity:
-                        Theme.of(context).brightness == Brightness.dark
-                        ? 0.12
-                        : 0.28,
-                    borderRadius: BorderRadius.circular(_radius),
-                    glowRadius: 10,
-                    specularGradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        Color(0xCCFFFFFF),
-                        Color(0x66FFFFFF),
-                        Color(0x00FFFFFF),
-                      ],
-                    ),
-                    child: child!,
-                  ),
+        // 输入栏容器
+        child: CupertinoLiquidGlass(
+          blurSigma: 10, // 更模糊一点
+          // tint 透明度：亮色 0.28（默认）、暗色 0.12——保持玻璃半透明，
+          // 过高（0.6）会变成白色实色
+          tintOpacity: Theme.of(context).brightness == Brightness.dark
+              ? 0.12
+              : 0.28,
+          borderRadius: BorderRadius.circular(_radius),
+          glowRadius: 10,
+          specularGradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xCCFFFFFF), Color(0x66FFFFFF), Color(0x00FFFFFF)],
           ),
           child: Stack(
             children: [
@@ -8346,7 +8300,6 @@ class _ChatHeader extends StatefulWidget {
     required this.onModelSelected,
     required this.onNewConversation,
     required this.onOpenProvidersSettings,
-    required this.scrollActiveListenable,
   });
 
   final double topPad;
@@ -8356,9 +8309,6 @@ class _ChatHeader extends StatefulWidget {
   final ValueChanged<String> onModelSelected;
   final VoidCallback onNewConversation;
   final VoidCallback onOpenProvidersSettings;
-
-  /// 主列表滚动中（true 时玻璃降级为纯色，见 build 注释）
-  final ValueListenable<bool> scrollActiveListenable;
 
   @override
   State<_ChatHeader> createState() => _ChatHeaderState();
@@ -8422,45 +8372,25 @@ class _ChatHeaderState extends State<_ChatHeader>
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        // 页眉玻璃区。滚动降级：BackdropFilter 对底下滚过的内容
-        // 每帧重采样是 GPU 大头——主列表滚动中切纯色替身（交叉
-        // 淡入淡出无跳变），停止后淡回玻璃
+        // 页眉玻璃区
         Positioned(
           top: 0,
           left: 0,
           right: 0,
           height: topPad + _headerBodyHeight,
-          child: ValueListenableBuilder<bool>(
-            valueListenable: widget.scrollActiveListenable,
-            builder: (context, active, child) => AnimatedSwitcher(
-              duration: const Duration(milliseconds: 140),
-              child: active
-                  ? DecoratedBox(
-                      key: const ValueKey('solid'),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).brightness == Brightness.dark
-                            ? const Color(0xEE161616)
-                            : const Color(0xEEFFFFFF),
-                      ),
-                      child: child!,
-                    )
-                  : CupertinoLiquidGlass(
-                      key: const ValueKey('glass'),
-                      blurSigma: 5,
-                      tintOpacity: 0.15,
-                      borderRadius: BorderRadius.zero,
-                      glowRadius: 10,
-                      specularGradient: const LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          Color(0xCCFFFFFF), // 白 80%
-                          Color(0x66FFFFFF), // 白 40%
-                          Color(0x00FFFFFF), // 全透明
-                        ],
-                      ),
-                      child: child!,
-                    ),
+          child: CupertinoLiquidGlass(
+            blurSigma: 5,
+            tintOpacity: 0.15,
+            borderRadius: BorderRadius.zero,
+            glowRadius: 10,
+            specularGradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color(0xCCFFFFFF), // 白 80%
+                Color(0x66FFFFFF), // 白 40%
+                Color(0x00FFFFFF), // 全透明
+              ],
             ),
             child: Stack(
               // 允许胶囊阴影溢出到列表上方（hardEdge 会裁掉底部阴影）
