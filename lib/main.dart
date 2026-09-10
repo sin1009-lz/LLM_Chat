@@ -7848,6 +7848,11 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
   /// 用户是否在底部（上翻查看时不强制拉回）
   bool _stickToBottom = true;
 
+  /// 流式窗口冻结锚点：null = 跟随最新（尾部窗口）；非 null = 用户
+  /// 上翻后冻结的窗口起点（字符偏移）——窗口不再前滑，内容稳定可读；
+  /// 滚回底部自动恢复跟随
+  int? _frozenHead;
+
   /// 用户是否正在手指拖动（拖动期间不跟随，与主列表同一逻辑）
   bool _dragging = false;
 
@@ -7866,13 +7871,24 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
     super.initState();
     _scroll.addListener(() {
       final pos = _scroll.position;
-      _stickToBottom = pos.pixels >= pos.maxScrollExtent - 8;
+      final atBottom = pos.pixels >= pos.maxScrollExtent - 8;
+      _stickToBottom = atBottom;
+      if (atBottom) {
+        _frozenHead = null; // 滚回底部 = 恢复跟随最新
+      } else if (_frozenHead == null &&
+          widget.streaming &&
+          widget.thinking.length > _kStreamThinkWindow) {
+        // 离开底部的一瞬：冻结当前窗口起点（此后新内容不再推动窗口）
+        _frozenHead = widget.thinking.length - _kStreamThinkWindow;
+      }
     });
   }
 
   @override
   void didUpdateWidget(_ThinkingBlock old) {
     super.didUpdateWidget(old);
+    // 流式结束/思考被清空（重新生成）：清除冻结锚点
+    if (!widget.streaming && old.streaming) _frozenHead = null;
     // 原生流式：贴底且未拖动时跟随滚动到底（拖动/上翻即暂停）
     if (widget.thinking != old.thinking && _stickToBottom && !_dragging) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -7892,13 +7908,26 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // 流式：尾部窗口（超长思考只显示最后 _kStreamThinkWindow 字符，
-    // 每帧布局成本恒定）；完成后显示全文
+    // 流式窗口：跟随模式 = 尾部 _kStreamThinkWindow 字符（每帧布局成本
+    // 恒定）；用户上翻后窗口冻结在 [_frozenHead, _frozenHead+窗口) ——
+    // 新内容不再把窗口往前推，上翻阅读位置稳定；滚回底部恢复跟随。
+    // 完成后切换全文
     final full = widget.thinking;
-    final text = widget.streaming && full.length > _kStreamThinkWindow
-        ? '…（前面 ${full.length - _kStreamThinkWindow} 字流式期间已折叠，完成后可上翻查看）\n'
-              '${full.substring(full.length - _kStreamThinkWindow)}'
-        : full;
+    var head = _frozenHead ?? full.length - _kStreamThinkWindow;
+    if (head > full.length - _kStreamThinkWindow) {
+      head = full.length - _kStreamThinkWindow; // 思考变短（重新生成）
+    }
+    final streamingWindow =
+        widget.streaming && full.length > _kStreamThinkWindow;
+    final String text;
+    if (!streamingWindow) {
+      text = full;
+    } else {
+      final end = math.min(head + _kStreamThinkWindow, full.length);
+      text = '${head > 0 ? '…（前面 $head 字已折叠；滚回底部恢复跟随）\n' : ''}'
+          '${full.substring(head, end)}'
+          '${end < full.length ? '\n…（更新的内容已收起，滚回底部跟随最新）' : ''}';
+    }
     final thinkStyle = theme.textTheme.bodySmall?.copyWith(
       color: Colors.grey.shade700,
       height: 1.5,
