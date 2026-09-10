@@ -8035,35 +8035,50 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                               // 上下边缘字符渐隐（ShaderMask dstIn，同附件条
                               // 横向渐隐的做法）：仅该方向有未滚到的内容时
                               // 才渐隐（顶部有上文/底部有下文），滚到尽头该端
-                              // 渐隐消失；ListenableBuilder 随滚动位置刷新
+                              // 渐隐消失；ListenableBuilder 随滚动位置刷新。
+                              // 颜色/停靠点按需构造——不渐隐的端不引入
+                              // 透明色（固定四段渐变在退化段 [0,0]/[1,1]
+                              // 会在边缘残留一条半透明细缝）
                               child: ListenableBuilder(
                                 listenable: _scroll,
                                 builder: (context, child) {
-                                  var topStop = 0.0;
-                                  var bottomStop = 1.0;
+                                  var topFade = false;
+                                  var bottomFade = false;
+                                  var f = 0.0;
                                   if (_scroll.hasClients) {
                                     final pos = _scroll.position;
                                     if (pos.maxScrollExtent > 0.5) {
-                                      final f =
-                                          28 / pos.viewportDimension;
-                                      if (pos.pixels > 0.5) topStop = f;
-                                      if (pos.pixels <
-                                          pos.maxScrollExtent - 0.5) {
-                                        bottomStop = 1 - f;
-                                      }
+                                      f = 28 / pos.viewportDimension;
+                                      topFade = pos.pixels > 0.5;
+                                      bottomFade =
+                                          pos.pixels < pos.maxScrollExtent - 0.5;
                                     }
+                                  }
+                                  // 两端都在尽头（或不可滚动）：无渐隐，
+                                  // 直接返回（也省掉一层 ShaderMask 图层）
+                                  if (!topFade && !bottomFade) return child!;
+                                  final colors = <Color>[];
+                                  final stops = <double>[];
+                                  if (topFade) {
+                                    colors.add(const Color(0x00FFFFFF));
+                                    stops.add(0.0);
+                                  }
+                                  colors
+                                    ..add(const Color(0xFFFFFFFF))
+                                    ..add(const Color(0xFFFFFFFF));
+                                  stops
+                                    ..add(topFade ? f : 0.0)
+                                    ..add(bottomFade ? 1 - f : 1.0);
+                                  if (bottomFade) {
+                                    colors.add(const Color(0x00FFFFFF));
+                                    stops.add(1.0);
                                   }
                                   return ShaderMask(
                                     shaderCallback: (rect) => LinearGradient(
                                       begin: Alignment.topCenter,
                                       end: Alignment.bottomCenter,
-                                      colors: const [
-                                        Color(0x00FFFFFF),
-                                        Color(0xFFFFFFFF),
-                                        Color(0xFFFFFFFF),
-                                        Color(0x00FFFFFF),
-                                      ],
-                                      stops: [0.0, topStop, bottomStop, 1.0],
+                                      colors: colors,
+                                      stops: stops,
                                     ).createShader(rect),
                                     blendMode: BlendMode.dstIn,
                                     child: child,
