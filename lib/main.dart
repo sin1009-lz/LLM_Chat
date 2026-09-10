@@ -8042,35 +8042,59 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                               child: ListenableBuilder(
                                 listenable: _scroll,
                                 builder: (context, child) {
-                                  var topFade = false;
-                                  var bottomFade = false;
+                                  // 渐隐幅度（边缘 alpha，1=不渐隐）：
+                                  // 随离边缘的滚动行程连续渐入（0~48px），
+                                  // 消除阈值处整条渐隐带突然出现/消失的跳变
+                                  var topEdge = 1.0;
+                                  var bottomEdge = 1.0;
                                   var f = 0.0;
                                   if (_scroll.hasClients) {
                                     final pos = _scroll.position;
                                     if (pos.maxScrollExtent > 0.5) {
                                       f = 28 / pos.viewportDimension;
-                                      topFade = pos.pixels > 0.5;
-                                      bottomFade =
-                                          pos.pixels < pos.maxScrollExtent - 0.5;
+                                      topEdge =
+                                          1.0 -
+                                          (pos.pixels / 48).clamp(0.0, 1.0);
+                                      bottomEdge =
+                                          1.0 -
+                                          ((pos.maxScrollExtent - pos.pixels) /
+                                                  48)
+                                              .clamp(0.0, 1.0);
                                     }
                                   }
+                                  final topOn = topEdge < 1.0;
+                                  final bottomOn = bottomEdge < 1.0;
                                   // 两端都在尽头（或不可滚动）：无渐隐，
                                   // 直接返回（也省掉一层 ShaderMask 图层）
-                                  if (!topFade && !bottomFade) return child!;
+                                  if (!topOn && !bottomOn) return child!;
                                   final colors = <Color>[];
                                   final stops = <double>[];
-                                  if (topFade) {
-                                    colors.add(const Color(0x00FFFFFF));
+                                  if (topOn) {
+                                    colors.add(
+                                      Color.fromARGB(
+                                        (255 * topEdge).round(),
+                                        255,
+                                        255,
+                                        255,
+                                      ),
+                                    );
                                     stops.add(0.0);
                                   }
                                   colors
                                     ..add(const Color(0xFFFFFFFF))
                                     ..add(const Color(0xFFFFFFFF));
                                   stops
-                                    ..add(topFade ? f : 0.0)
-                                    ..add(bottomFade ? 1 - f : 1.0);
-                                  if (bottomFade) {
-                                    colors.add(const Color(0x00FFFFFF));
+                                    ..add(topOn ? f : 0.0)
+                                    ..add(bottomOn ? 1 - f : 1.0);
+                                  if (bottomOn) {
+                                    colors.add(
+                                      Color.fromARGB(
+                                        (255 * bottomEdge).round(),
+                                        255,
+                                        255,
+                                        255,
+                                      ),
+                                    );
                                     stops.add(1.0);
                                   }
                                   return ShaderMask(
