@@ -3956,20 +3956,68 @@ class _HomePageState extends State<HomePage>
   /// 按需加载会话完整正文：打开会话时把列表中的元数据壳替换为
   /// 完整对象。isolate 读文件 + 解析（带图会话几 MB 的 JSON 在
   /// 主线程同步解析卡顿数百毫秒——切对话卡顿的根源）；
-  /// 防重入：同壳只加载一次
+  /// 防重入：同壳只加载一次。返回加载出的完整会话
   Conversation? _materializing;
-  Future<void> _materialize(Conversation shell) async {
-    if (shell.loaded || identical(_materializing, shell)) return;
+  Future<Conversation?> _materialize(Conversation shell) async {
+    if (shell.loaded) return shell;
     final store = _store;
-    if (store == null) return;
+    if (store == null) return null;
+    if (identical(_materializing, shell)) return null;
     _materializing = shell;
     final full = await store.loadConversationAsync(shell.id);
     _materializing = null;
-    if (full == null) return;
+    if (full == null) return null;
     final i = _conversations.indexWhere((c) => c.id == shell.id);
     if (i >= 0 && mounted) {
       setState(() => _conversations[i] = full);
     }
+    return full;
+  }
+
+  /// 连续点击不同会话时的防竞态标记：只应用最后一次点击的换入
+  String? _openingConvId;
+
+  /// 打开历史会话（抽屉列表点击）。时序与动画解耦：
+  /// 1. 抽屉收起动画立即开始（纯动画，无重负载）
+  /// 2. isolate 加载正文（后台）
+  /// 3. 两者都完成后再一次性 setState 换入——消息列表首建是长帧
+  ///    （几十个气泡 + markdown），避开动画窗口执行就不会掉帧；
+  ///    期间页面保持旧会话内容，无空页转圈等待
+  Future<void> _openConversation(Conversation c) async {
+    _stopSpeaking();
+    _drawerController.animateTo(0, curve: Curves.easeOutQuart);
+    if (c.loaded) {
+      // 已物化：无重负载，直接切换
+      setState(() {
+        _currentId = c.id;
+        _historyLongPressed = null;
+      });
+      _scrollToBottom();
+      return;
+    }
+    _openingConvId = c.id;
+    final full = await _materialize(c);
+    if (!mounted || full == null || _openingConvId != c.id) return;
+    // 等抽屉完全收起（animateTo(0) 结束于 dismissed）
+    if (_drawerController.isAnimating) {
+      final done = Completer<void>();
+      void onStatus(AnimationStatus s) {
+        if (s == AnimationStatus.completed || s == AnimationStatus.dismissed) {
+          _drawerController.removeStatusListener(onStatus);
+          if (!done.isCompleted) done.complete();
+        }
+      }
+      _drawerController.addStatusListener(onStatus);
+      await done.future;
+    }
+    // 让出一帧再换入：长帧发生在静止画面上（内容出现），非动画中
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || _openingConvId != c.id) return;
+    setState(() {
+      _historyLongPressed = null;
+      _currentId = c.id;
+    });
+    _scrollToBottom();
   }
 
   /// 设置页归档管理改动后：重载会话列表（恢复/删除归档对话）
@@ -6278,22 +6326,9 @@ class _HomePageState extends State<HomePage>
                                             );
                                             return;
                                           }
-                                          // 切换会话
-                                          setState(() {
-                                            _currentId = c.id;
-                                            _historyLongPressed = null;
-                                          });
-                                          // 按需加载完整正文（列表里是
-                                          // 元数据壳，冷启动不解析消息）
-                                          _materialize(c);
-                                          // 切换会话：停止上一会的朗读
-                                          _stopSpeaking();
-                                          _drawerController.animateTo(
-                                            0,
-                                            curve: Curves.easeOutQuart,
-                                          );
-                                          // 切换后贴底看最新消息
-                                          _scrollToBottom();
+                                          // 切换会话（时序与动画解耦，
+                                          // 见 _openConversation）
+                                          _openConversation(c);
                                         },
                                         onLongPress: _batchMode
                                             ? null
