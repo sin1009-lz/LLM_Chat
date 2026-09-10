@@ -112,15 +112,17 @@ class _MarkdownViewState extends State<MarkdownView> {
   int _safeSplit(String data) {
     const tailWindow = 420;
     if (data.length < tailWindow * 2) return 0;
-    var i = data.lastIndexOf('\\nn');
+    // 注意必须是真实换行 '\n\n'（曾误写为 '\\nn' 字面量——切分恒失败，
+    // 全文当尾段每帧全量重渲染 = 流式卡顿根源）
+    var i = data.lastIndexOf('\n\n');
     while (i > 0 && data.length - i < tailWindow) {
-      i = data.lastIndexOf('\\nn', i - 1);
+      i = data.lastIndexOf('\n\n', i - 1);
     }
     final fence = RegExp(r'^```', multiLine: true);
     while (i > 0) {
       final fences = fence.allMatches(data).where((m) => m.start < i).length;
       if (fences.isEven) break; // 边界在围栏外
-      i = data.lastIndexOf('\\nn', i - 1);
+      i = data.lastIndexOf('\n\n', i - 1);
     }
     return i > 0 ? i + 2 : 0; // 边界含空行归前缀
   }
