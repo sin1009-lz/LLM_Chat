@@ -7863,50 +7863,60 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                     ),
                   ],
                 ),
-                // 展开/收起：AnimatedCrossFade（框架标准组件——
-                // 内部对尺寸做双轴 SizeTween 统一插值 + 交叉淡入，
-                // 宽高同曲线同时长，无轴间不均匀）
-                AnimatedCrossFade(
+                // 展开/收起：AnimatedSize + 折叠态零尺寸（SizedBox.shrink）。
+                // 不用 AnimatedCrossFade：它的折叠尺寸取两个子项的最大宽，
+                // 收起后仍占满整行；shrink 让宽度随内容一起收缩。
+                // 透明度单独 TweenAnimationBuilder 超前 1.4 倍速淡入
+                //（220/1.4≈157ms）：内容先于尺寸到位，双轴动画观感更均匀
+                AnimatedSize(
+                  alignment: Alignment.topLeft,
                   duration: const Duration(milliseconds: 220),
                   reverseDuration: const Duration(milliseconds: 180),
-                  sizeCurve: Curves.easeOutCubic,
-                  firstCurve: const Interval(0.5, 1.0),
-                  secondCurve: const Interval(0.0, 0.5),
-                  crossFadeState: _expanded
-                      ? CrossFadeState.showSecond
-                      : CrossFadeState.showFirst,
-                  firstChild: const SizedBox(width: double.infinity),
-                  secondChild: Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    // 展开内容：最大高度限制（llama.cpp 28rem 的移动端
-                    // 折中），超出部分在块内滚动；拖动状态由
-                    // NotificationListener 跟踪
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 320),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: NotificationListener<ScrollNotification>(
-                          onNotification: _onScrollNotification,
-                          child: SingleChildScrollView(
-                            controller: _scroll,
-                            // 永远接受滚动手势：默认 Clamping 在边缘会
-                            // 拒绝新手势（竞技场输给外层聊天列表 →
-                            // 到底后再拖会滚动整个屏幕）
-                            physics: AlwaysScrollableScrollPhysics(
-                              parent: ClampingScrollPhysics(),
+                  curve: Curves.easeOutCubic,
+                  child: _expanded
+                      ? Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          // 展开内容：最大高度限制（llama.cpp 28rem 的移动端
+                          // 折中），超出部分在块内滚动；拖动状态由
+                          // NotificationListener 跟踪
+                          child: TweenAnimationBuilder<double>(
+                            tween: Tween(begin: 0.0, end: 1.0),
+                            duration: const Duration(milliseconds: 157),
+                            builder: (context, opacity, child) => Opacity(
+                              opacity: opacity,
+                              child: child,
                             ),
-                            child: SelectableText(
-                              widget.thinking,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: Colors.grey.shade700,
-                                height: 1.5,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                maxHeight: 320,
+                              ),
+                              child: SizedBox(
+                                width: double.infinity,
+                                child: NotificationListener<ScrollNotification>(
+                                  onNotification: _onScrollNotification,
+                                  child: SingleChildScrollView(
+                                    controller: _scroll,
+                                    // 永远接受滚动手势：默认 Clamping 在边缘
+                                    // 会拒绝新手势（竞技场输给外层聊天列表 →
+                                    // 到底后再拖会滚动整个屏幕）
+                                    physics: AlwaysScrollableScrollPhysics(
+                                      parent: ClampingScrollPhysics(),
+                                    ),
+                                    child: SelectableText(
+                                      widget.thinking,
+                                      style: theme.textTheme.bodySmall
+                                          ?.copyWith(
+                                            color: Colors.grey.shade700,
+                                            height: 1.5,
+                                          ),
+                                    ),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ),
-                    ),
-                  ),
+                        )
+                      : const SizedBox.shrink(),
                 ),
               ],
             ),
