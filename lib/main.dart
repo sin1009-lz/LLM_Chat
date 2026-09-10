@@ -11,6 +11,7 @@ import 'package:cupertino_liquid_glass/cupertino_liquid_glass.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderProxyBox;
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -3316,6 +3317,10 @@ class _HomePageState extends State<HomePage>
   /// 输入栏容器顶边位置（附件条绑定其上，由输入栏实时上报）
   final ValueNotifier<double> _inputBarTop = ValueNotifier(64);
 
+  /// 输入栏容器【动画中】的逐帧高度（_SizeReporter 布局回调上报；
+  /// 仅附件条跟随用——列表留白/空状态仍用 _inputBarTop 的目标值）
+  final ValueNotifier<double> _inputBarAnimatedTop = ValueNotifier(64);
+
   /// CustomScrollView center 锚点 key（消息列表顶部锚定）
   final GlobalKey _listCenterKey = GlobalKey();
 
@@ -4015,6 +4020,7 @@ class _HomePageState extends State<HomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _streamTick.dispose();
+    _inputBarAnimatedTop.dispose();
     _tts?.stop();
     _streamSub?.cancel();
     _maintainTimer?.cancel();
@@ -4216,6 +4222,7 @@ class _HomePageState extends State<HomePage>
             onTakePhoto: _takePhoto,
             onAddFile: _pickFiles,
             containerTopNotifier: _inputBarTop,
+            animatedTopNotifier: _inputBarAnimatedTop,
             isResponding: _isResponding,
             onSend: _onSend,
             onStop: _onStop,
@@ -4353,10 +4360,11 @@ class _HomePageState extends State<HomePage>
                   children: [
                     // 主内容：列表/页眉/输入栏（静态，动画期间复用）
                     mainContent,
-                    // 附件条：主界面内（随 Transform 移动），
-                    // 位置绑定输入栏容器顶边；被变暗遮罩覆盖
+                    // 附件条：主界面内（随 Transform 移动），位置绑定输入栏
+                    // 容器顶边【动画中的逐帧高度】（_SizeReporter 布局回调），
+                    // 跟随容器展开/收起动画；被变暗遮罩覆盖
                     ValueListenableBuilder<double>(
-                      valueListenable: _inputBarTop,
+                      valueListenable: _inputBarAnimatedTop,
                       builder: (context, top, _) {
                         if (_attachments.isEmpty) {
                           return const SizedBox.shrink();
@@ -6649,6 +6657,37 @@ class _Attachment {
   }
 }
 
+/// 尺寸被动上报：布局阶段拿到子项真实尺寸（隐式动画期间每帧布局
+/// 都会触发），microtask 里回调整避免布局期间同步通知监听者重建。
+/// 用于附件条跟随输入栏容器的展开/收起动画
+class _SizeReporter extends SingleChildRenderObjectWidget {
+  const _SizeReporter({required this.onSize, super.child});
+
+  final void Function(double height) onSize;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderSizeReporter(onSize);
+}
+
+class _RenderSizeReporter extends RenderProxyBox {
+  _RenderSizeReporter(this.onSize);
+
+  final void Function(double height) onSize;
+  double? _last;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    final h = size.height;
+    if (_last != h && h.isFinite) {
+      _last = h;
+      final cb = onSize;
+      scheduleMicrotask(() => cb(h));
+    }
+  }
+}
+
 /// 附件条：独立容器（悬浮于输入栏上方，z 最高），
 /// 横向滚动与角标删除点击统一由本容器处理，不受其他层干扰
 class _AttachmentBar extends StatelessWidget {
@@ -6863,6 +6902,7 @@ class _GlassInputBar extends StatefulWidget {
     required this.onTakePhoto,
     required this.onAddFile,
     required this.containerTopNotifier,
+    required this.animatedTopNotifier,
     required this.onSend,
     required this.isResponding,
     required this.onStop,
@@ -6894,6 +6934,10 @@ class _GlassInputBar extends StatefulWidget {
 
   /// 上报输入栏容器顶边位置（附件条绑定其上方）
   final ValueNotifier<double> containerTopNotifier;
+
+  /// 上报输入栏容器【动画中】的真实高度（布局阶段被动逐帧测量；
+  /// 附件条跟随容器动画用，与 containerTopNotifier 的目标值互不干扰）
+  final ValueNotifier<double> animatedTopNotifier;
 
   /// 发送消息（文本 + 附件名列表）；由 HomePage 处理实际对话逻辑
   final void Function(String text, List<String> attachmentNames) onSend;
@@ -7103,9 +7147,12 @@ class _GlassInputBarState extends State<_GlassInputBar> {
     final initTop = (_side - _inputHeight) / 2;
     final inputTop = _active ? _topPad : initTop;
 
-    // 容器动画高度的上报（附件条跟随）见占位 TweenAnimationBuilder——
-    // 逐帧把动画中的真实高度写进 containerTopNotifier；不再在 build
-    // 里一次性写终点值（那会让附件条瞬移到终点，与容器动画脱节）
+    // 目标总高：build 时一次性写入 containerTopNotifier——列表底部
+    // 留白/空状态用（跳变一次，滚动补偿统一处理）。附件条的逐帧跟随
+    // 不走这条链路：由 _SizeReporter 在布局阶段被动上报动画中的真实
+    // 高度到 animatedTopNotifier（见占位处的包装），互不干扰
+    final containerHeight = (_active ? _topPad + _inputHeight : 0) + _side;
+    widget.containerTopNotifier.value = containerHeight + 8;
 
     return Align(
       alignment: Alignment.bottomCenter,
@@ -7139,32 +7186,24 @@ class _GlassInputBarState extends State<_GlassInputBar> {
           ),
           child: Stack(
             children: [
-              // 非定位占位：决定容器尺寸（激活时顶部让出输入栏空间 + 底部按钮行）
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // TweenAnimationBuilder（替代 AnimatedContainer）：每帧拿到
-                  // 插值中的高度 v，既画占位也逐帧上报给附件条/列表留白——
-                  // 附件条跟着容器一起动画，而不是瞬移到终点。
-                  // 曲线/时长与原 AnimatedContainer 一致（easeOutBack 回弹一致）
-                  TweenAnimationBuilder<double>(
-                    tween: Tween(
-                      begin: 0.0,
-                      end: _active ? _topPad + _inputHeight : 0.0,
+              // 非定位占位：决定容器尺寸（激活时顶部让出输入栏空间 + 底部按钮行）。
+              // _SizeReporter：布局阶段把动画中的真实容器高度逐帧上报给
+              // 附件条（AnimatedContainer 隐式动画只改布局不回调，被动测量
+              // 是唯一逐帧来源）；microtask 上报避免布局期间改监听者
+              _SizeReporter(
+                onSize: (h) =>
+                    widget.animatedTopNotifier.value = h + 8,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 300),
+                      curve: Curves.easeOutBack, // 非线性：先快后缓 + 轻微回弹
+                      height: _active ? _topPad + _inputHeight : 0,
                     ),
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOutBack,
-                    builder: (context, v, _) {
-                      // 帧后上报：build 期间改 ValueNotifier 会同步通知监听者
-                      //（ValueListenableBuilder）触发 mid-build 重建
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        widget.containerTopNotifier.value = v + _side + 8;
-                      });
-                      return SizedBox(width: double.infinity, height: v);
-                    },
-                  ),
-                  SizedBox(width: containerWidth, height: _side),
-                ],
+                    SizedBox(width: containerWidth, height: _side),
+                  ],
+                ),
               ),
               // 输入栏：位置跟随容器（top 无独立动画，由容器增高带动上移），
               // 只保留拉长动画——整体一致，无顺序感
