@@ -1276,9 +1276,10 @@ class _HomePageState extends State<HomePage>
         'description':
             '在设备本地沙箱中运行 Python 代码（Pyodide，含 numpy/pandas/matplotlib/'
             'scipy/sympy 等科学计算包，无需网络即可用）。代码的 stdout 输出和最后 '
-            '表达式结果会返回给你；matplotlib 生成的图表会直接展示给用户。'
-            '涉及数学计算、数据处理与分析、文件内容解析、画图/可视化、逻辑验证时'
-            '调用。请在代码中用 print() 输出关键结果。变量在多次调用间保留。',
+            '表达式结果会返回给你。变量在多次调用间保留。'
+            '注意：生成的图表不会自动展示给用户——需要用户看到图片时，'
+            '先把图保存为文件（如 plt.savefig("out.png", dpi=110)），'
+            '再调用 send_image 工具发送。',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -1511,7 +1512,8 @@ class _HomePageState extends State<HomePage>
           ].join('\n');
           if (imgs.isNotEmpty) {
             text +=
-                '${text.isEmpty ? '' : '\n'}[已生成 ${imgs.length} 张图表，点击工具卡片查看]';
+                '${text.isEmpty ? '' : '\n'}[已生成 ${imgs.length} 张图表；'
+                '要展示给用户请先 plt.savefig 保存，再调 send_image 发送]';
           }
           if (text.isEmpty) text = '(无输出)';
           done.complete((text: text, images: imgs));
@@ -1924,16 +1926,19 @@ class _HomePageState extends State<HomePage>
             'function': {'name': call.name, 'arguments': call.args},
           });
           // 卡片：工具名（去前缀）+ 参数摘要，挂在本轮气泡上。
-          // 内置工具名剥离 builtin__ 前缀
+          // 内置工具名剥离 builtin__ 前缀。send_image 不出卡片——
+          // 图片直接挂到气泡里，再闪一个调用卡片是噪音
           final toolDef = toolMap[call.name];
           final displayName = call.name.startsWith('builtin__')
               ? call.name.substring('builtin__'.length)
               : (toolDef?.$2.name ?? call.name);
-          final card = ToolCallRecord(
-            name: displayName,
-            query: _summarizeArgs(call.args),
-          );
-          setState(() => current.toolCalls!.add(card));
+          final card = call.name == kBuiltinSendImageTool
+              ? null
+              : ToolCallRecord(
+                  name: displayName,
+                  query: _summarizeArgs(call.args),
+                );
+          if (card != null) setState(() => current.toolCalls!.add(card));
 
           // 执行工具：内置工具走本地执行，MCP 工具走远程调用
           String resultText;
@@ -1956,10 +1961,14 @@ class _HomePageState extends State<HomePage>
                   ),
                 );
                 resultText = r.text.isEmpty ? '(空结果)' : r.text;
-                card.output = resultText.length > 4000
-                    ? '${resultText.substring(0, 4000)}…'
-                    : resultText;
-                card.images = r.images.isNotEmpty ? List.of(r.images) : null;
+                if (card != null) {
+                  card.output = resultText.length > 4000
+                      ? '${resultText.substring(0, 4000)}…'
+                      : resultText;
+                  // 图表不再挂卡片（与 send_image 发出的图重复）：
+                  // 需要用户看到时模型应 savefig + send_image
+                  card.images = null;
+                }
                 resultCode = resultText.length;
               } else if (call.name == kBuiltinSendImageTool) {
                 // 发图给用户：读 Python 保存的文件 → 挂到本条助手消息
@@ -1973,9 +1982,6 @@ class _HomePageState extends State<HomePage>
                   onTimeout: () => '读取图片超时（60 秒），请重试',
                 );
                 resultText = r;
-                card.output = resultText.length > 4000
-                    ? '${resultText.substring(0, 4000)}…'
-                    : resultText;
                 resultCode = resultText.startsWith('[图片已发送') ? 1 : -1;
               } else {
                 resultText =
@@ -2007,7 +2013,7 @@ class _HomePageState extends State<HomePage>
             finishOnStop();
             return;
           }
-          setState(() => card.resultCount = resultCode);
+          if (card != null) setState(() => card.resultCount = resultCode);
           toolMessages.add({
             'role': 'tool',
             'tool_call_id': toolCallId,
