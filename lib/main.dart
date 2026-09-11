@@ -6755,7 +6755,12 @@ class _HomePageState extends State<HomePage>
                 child: header,
               ),
               if (first.roundsExpanded) ...[
-                const SizedBox(height: 6),
+                // 标题头与内容之间的分界线
+                Container(
+                  height: 0.5,
+                  margin: const EdgeInsets.symmetric(vertical: 6),
+                  color: Colors.grey.withValues(alpha: 0.3),
+                ),
                 ...children,
               ],
             ],
