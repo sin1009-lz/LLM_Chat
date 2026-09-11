@@ -1441,18 +1441,30 @@ class _HomePageState extends State<HomePage>
         _pyReply(req, await cached.readAsBytes(), path);
         return;
       }
-      // 3. 回源 CDN（仅 /pyodide/ 下的包文件）→ 落盘缓存
+      // 3. 回源 CDN（仅 /pyodide/ 下的包文件）→ 落盘缓存。
+      // 多 CDN 依次尝试：jsdelivr 主站在国内常不可达（大包 numpy/
+      // matplotlib 超时、小包偶发成功），fastly/gcore 镜像是国内
+      // 常用替代；单 CDN 60s 超时（大包十几 MB，慢网需要余量），
+      // 成功即落盘，二次使用零流量
       if (path.startsWith('/pyodide/')) {
-        final res = await http
-            .get(Uri.parse(
-              'https://cdn.jsdelivr.net/pyodide/v0.28.3/full${path.substring('/pyodide'.length)}',
-            ))
-            .timeout(const Duration(seconds: 30));
-        if (res.statusCode == 200) {
-          await cached.create(recursive: true);
-          await cached.writeAsBytes(res.bodyBytes, flush: true);
-          _pyReply(req, res.bodyBytes, path);
-          return;
+        const cdns = [
+          'https://cdn.jsdelivr.net/pyodide/v0.28.3/full',
+          'https://fastly.jsdelivr.net/pyodide/v0.28.3/full',
+          'https://gcore.jsdelivr.net/pyodide/v0.28.3/full',
+        ];
+        final sub = path.substring('/pyodide'.length);
+        for (final cdn in cdns) {
+          try {
+            final res = await http
+                .get(Uri.parse('$cdn$sub'))
+                .timeout(const Duration(seconds: 60));
+            if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+              await cached.create(recursive: true);
+              await cached.writeAsBytes(res.bodyBytes, flush: true);
+              _pyReply(req, res.bodyBytes, path);
+              return;
+            }
+          } catch (_) {}
         }
       }
       req.response.statusCode = 404;
