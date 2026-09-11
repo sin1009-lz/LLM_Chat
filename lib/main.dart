@@ -968,6 +968,7 @@ class _HomePageState extends State<HomePage>
         imgJobs.add(att.name);
         imgJobs.add(aiBytes);
         imgJobs.add(thumbBytes);
+        imgJobs.add('image/jpeg'); // 原生压缩输出恒为 JPEG
       } catch (_) {
         // 兜底：原生压缩失败——仅端点支持的格式（webp/png/jpeg/gif）
         // 原图直传；其余（heic/bmp 等）直发会被整单 400，降级文件名
@@ -995,26 +996,20 @@ class _HomePageState extends State<HomePage>
       final jobs = <(String, Uint8List)>[];
       final names = <String>[];
       final mimes = <String>[];
+      // 定长 4 槽协议：name / AI 档字节 / 缩略字节(可空) / mime。
+      //（此前按"第 4 项是否字符串"猜变长边界，多图时会把下一张图的
+      // 文件名当成本张的 MIME = data:photo2.jpg → 端点 400，单图正常）
       var i = 0;
-      while (i < imgJobs.length) {
+      while (i + 3 < imgJobs.length) {
         final name = imgJobs[i] as String;
         final ai = imgJobs[i + 1] as Uint8List;
         final thumb = imgJobs[i + 2] as Uint8List?;
-        final mime = (i + 3 < imgJobs.length && imgJobs[i + 3] is String)
-            ? imgJobs[i + 3] as String
-            : 'image/jpeg';
-        if (thumb != null) {
-          names.add(name);
-          mimes.add(mime);
-          jobs.add((mime, ai));
-          jobs.add((mime, thumb));
-        } else {
-          names.add(name);
-          mimes.add(mime);
-          jobs.add((mime, ai));
-          jobs.add((mime, ai)); // 无缩略：显示兜底用 AI 档
-        }
-        i += thumb != null ? 3 : 4;
+        final mime = imgJobs[i + 3] as String;
+        names.add(name);
+        mimes.add(mime);
+        jobs.add((mime, ai));
+        jobs.add((mime, thumb ?? ai)); // 无缩略：显示兜底用 AI 档
+        i += 4;
       }
       final urls = await compute(_bytesToDataUrls, jobs);
       for (var k = 0; k < names.length; k++) {
