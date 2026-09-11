@@ -6077,6 +6077,30 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
+  /// 该消息是否为「已折叠的工具轮组内非首成员」——此类消息渲染为空，
+  /// 外层边距也应归零（_MessageItem 调用；组首渲染摘要胶囊不算）
+  bool isCollapsedToolMember(Message m) {
+    if (_isResponding || (m.toolCalls?.isEmpty ?? true)) return false;
+    final conv = _currentConversation;
+    if (conv == null) return false;
+    final i = conv.messages.indexOf(m);
+    if (i <= 0) return false;
+    final prev = conv.messages[i - 1];
+    // 前一条是用户消息或非工具轮 → 本条是组首（渲染胶囊）
+    if (prev.role == Role.user ||
+        (prev.toolCalls?.isEmpty ?? true)) {
+      return false;
+    }
+    // 组状态挂在组首：向上扫到组首取 toolExpanded
+    var g = i;
+    while (g > 0 &&
+        conv.messages[g - 1].role != Role.user &&
+        (conv.messages[g - 1].toolCalls?.isNotEmpty ?? false)) {
+      g--;
+    }
+    return !conv.messages[g].toolExpanded;
+  }
+
   Widget _toolCallDivider(BuildContext context, Message m) {
     // 静默卡片（send_image）不渲染——它只用于标记"这是工具轮"
     //（该轮不显示消息工具栏，避免一轮出现两个工具栏）
@@ -8608,10 +8632,14 @@ class _MessageItemState extends State<_MessageItem> {
     final home = _HomePageScope.of(context);
     // 工具轮包 AnimatedSize：响应结束后的整组折叠/展开动画。
     // 流式期间零时长（气泡内容渐变增高若走动画会与滚动跟随错位）
+    // 折叠的组内成员：外边距归零（否则每条留 12px 空带，堆在胶囊图片
+    // 与最终回答之间 = 展开前后的空隙）。Padding/AnimatedSize 结构
+    // 保持连续，元素复用 → 展开动画不中断
     final isToolRound = widget.message.toolCalls?.isNotEmpty ?? false;
     final bubble = home.buildMessageBubble(context, widget.message, widget.index);
+    final hidden = home.isCollapsedToolMember(widget.message);
     return _cached ??= Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: hidden ? EdgeInsets.zero : const EdgeInsets.only(bottom: 12),
       child: isToolRound
           ? AnimatedSize(
               duration: widget.streaming
