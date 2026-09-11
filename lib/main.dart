@@ -4913,6 +4913,8 @@ class _HomePageState extends State<HomePage>
     final conv = _currentConversation;
     final isStreamingTarget =
         _isResponding && !isUser && conv != null && conv.messages.last == m;
+    // 组首展开态的「收起工具过程」回调（组首消息正文上方渲染）
+    VoidCallback? _showToolCollapseBar;
     // 工具轮折叠（按整段响应分组）：响应结束后，本段响应的全部中间
     // 工具轮（轮内文字/思考/工具卡）合成为【一个】摘要胶囊——由组首
     // 消息渲染，组内其余消息折叠态渲染为空；各轮发送的图片聚合到
@@ -4941,7 +4943,7 @@ class _HomePageState extends State<HomePage>
             (mk.toolCalls?.isEmpty ?? true)) {
           break;
         }
-        anyTruncated |= mk.truncated;
+        // 截断轮也参与折叠（展开可见「已停止输出」标记）
         imgs.addAll(mk.imageParts ?? const <ImagePart>[]);
         names.addAll(
           (mk.toolCalls ?? const <ToolCallRecord>[])
@@ -4949,7 +4951,7 @@ class _HomePageState extends State<HomePage>
               .map((t) => t.name),
         );
       }
-      if (!groupFirst.toolExpanded && !anyTruncated) {
+      if (!groupFirst.toolExpanded) {
         if (g != index) return const SizedBox.shrink(); // 组内非首：折叠态为空
         final shown = names.take(3).join('、');
         final label = names.isEmpty
@@ -5014,6 +5016,12 @@ class _HomePageState extends State<HomePage>
               ),
           ],
         );
+      } else if (g == index) {
+        // 组首 + 展开态：正文上方渲染「收起」条（展开/收起的显式入口）
+        _showToolCollapseBar = () => setState(() {
+          groupFirst.toolExpanded = false;
+          _renderEpoch++;
+        });
       }
     }
     // 分支导航数据源：本消息自己的分支优先；工具轮次的分支挂在轮首
@@ -5067,6 +5075,55 @@ class _HomePageState extends State<HomePage>
           child: Column(
             crossAxisAlignment: align,
             children: [
+              // 组首展开态的「收起工具过程」条（工具轮折叠的显式入口）
+              if (_showToolCollapseBar != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: _showToolCollapseBar,
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).brightness == Brightness.dark
+                            ? const Color(0xFF262626)
+                            : const Color(0xFFF2F2F2),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.grey.withValues(alpha: 0.25),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.hub_outlined,
+                            size: 13,
+                            color: Colors.grey.shade700,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            '收起工具过程',
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(
+                                  color: Colors.grey.shade700,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                          const Spacer(),
+                          Icon(
+                            Icons.expand_less,
+                            size: 16,
+                            color: Colors.grey.shade700,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               // 思考过程区（仅 assistant 且有 thinking 时显示，折叠/展开）。
               // 思考深度关闭（0）时隐藏思考块——切换思考模式的实际可见效果；
               // 例外：输出被截断/停止时显示（未完成的过程需可见）
@@ -8549,9 +8606,23 @@ class _MessageItemState extends State<_MessageItem> {
   @override
   Widget build(BuildContext context) {
     final home = _HomePageScope.of(context);
+    // 工具轮包 AnimatedSize：响应结束后的整组折叠/展开动画。
+    // 流式期间零时长（气泡内容渐变增高若走动画会与滚动跟随错位）
+    final isToolRound = widget.message.toolCalls?.isNotEmpty ?? false;
+    final bubble = home.buildMessageBubble(context, widget.message, widget.index);
     return _cached ??= Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: home.buildMessageBubble(context, widget.message, widget.index),
+      child: isToolRound
+          ? AnimatedSize(
+              duration: widget.streaming
+                  ? Duration.zero
+                  : const Duration(milliseconds: 220),
+              reverseDuration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.topLeft,
+              child: bubble,
+            )
+          : bubble,
     );
   }
 }
