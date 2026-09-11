@@ -4916,14 +4916,14 @@ class _HomePageState extends State<HomePage>
     final conv = _currentConversation;
     final isStreamingTarget =
         _isResponding && !isUser && conv != null && conv.messages.last == m;
-    // 组首展开态的「收起工具过程」回调（组首消息正文上方渲染）
-    VoidCallback? _showToolCollapseBar;
-    // 工具轮折叠（按整段响应分组 · 步进收纳）：本轮不再是会话最后一
-    // 条消息时（新一轮气泡已开 / 已有最终回答）即收纳——每轮完成
-    // 即收，直到没有新一轮。整组收纳为一个无卡片文本行
-    // 「调用工具：…」（与背景融合），下方以细分割线与主输出分隔；
-    // 各轮发送的图片聚合在文本行下保持可见。toolExpanded（挂组首，
-    // 瞬态不持久化）为用户手动展开态
+    // 工具收纳（Kimi 式分组折叠 · 步进收纳）：本轮不再是会话最后一
+    // 条消息时（新一轮气泡已开 / 已有最终回答）即收纳。整组收纳到
+    // 组首消息内的一个折叠块：统一「调用工具」行（两态同一元素，
+    // 箭头连续旋转）+ AnimatedSwitcher 内容交叉淡入；各轮图片聚合
+    // 保持可见。toolExpanded（挂组首，瞬态不持久化）为手动展开态
+    var toolCollapsed = false;
+    VoidCallback? toolToggle;
+    var toolImgs = const <ImagePart>[];
     final isLastMsg = conv == null || conv.messages.last == m;
     if (!isUser &&
         !isLastMsg &&
@@ -4937,82 +4937,23 @@ class _HomePageState extends State<HomePage>
         g--;
       }
       final groupFirst = conv.messages[g];
-      // 向后聚合：工具名 + 图片
-      final names = <String>[];
       final imgs = <ImagePart>[];
       for (var k = g; k < conv.messages.length; k++) {
         final mk = conv.messages[k];
-        if (mk.role == Role.user ||
-            (mk.toolCalls?.isEmpty ?? true)) {
-          break;
-        }
+        if (mk.role == Role.user || (mk.toolCalls?.isEmpty ?? true)) break;
         imgs.addAll(mk.imageParts ?? const <ImagePart>[]);
-        names.addAll(
-          (mk.toolCalls ?? const <ToolCallRecord>[])
-              .where((t) => !t.silent)
-              .map((t) => t.name),
-        );
       }
       if (!groupFirst.toolExpanded) {
-        if (g != index) return const SizedBox.shrink(); // 组内非首：收纳态为空
-        final grey = Colors.grey.shade700;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 收纳行：纯文本（无卡片底），点击展开整组
-            InkWell(
-              borderRadius: BorderRadius.circular(6),
-              onTap: () => setState(() {
-                groupFirst.toolExpanded = true;
-                _renderEpoch++; // 组状态变化：全局失效（epoch 在签名内）
-              }),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  children: [
-                    Text(
-                      '调用工具',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: grey,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    // 挂载补间旋转 0→180°（收起方向）；与展开行的 180→0°
-                    // 成对，切换观感为同一箭头连续转动
-                    TweenAnimationBuilder<double>(
-                      tween: Tween(begin: 0.0, end: 0.5),
-                      duration: const Duration(milliseconds: 200),
-                      curve: Curves.easeOutCubic,
-                      builder: (_, t, child) =>
-                          Transform.rotate(angle: t * math.pi, child: child),
-                      child: Icon(Icons.expand_more, size: 18, color: grey),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // 各轮发送的图片不随收纳隐藏（聚合展示）
-            if (imgs.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 2, bottom: 6),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: _imageGrid(context, imgs),
-                ),
-              ),
-            // 与主输出内容之间的分割线（比文字长一点）
-            Container(
-              width: 88,
-              height: 0.5,
-              margin: const EdgeInsets.only(top: 6, bottom: 2),
-              color: Colors.grey.withValues(alpha: 0.3),
-            ),
-          ],
-        );
+        // 组内非首：收纳态渲染为空（外层边距同步归零）
+        if (g != index) return const SizedBox.shrink();
+        toolCollapsed = true;
+        toolImgs = imgs;
+        toolToggle = () => setState(() {
+          groupFirst.toolExpanded = true;
+          _renderEpoch++;
+        });
       } else if (g == index) {
-        // 组首 + 展开态：正文上方渲染「收起」行（无卡片）
-        _showToolCollapseBar = () => setState(() {
+        toolToggle = () => setState(() {
           groupFirst.toolExpanded = false;
           _renderEpoch++;
         });
@@ -5057,61 +4998,9 @@ class _HomePageState extends State<HomePage>
         onPickAttachments: _pickEditAttachments,
       );
     }
-    return RepaintBoundary(
-      // 流式期间正在更新的气泡频繁重绘；RepaintBoundary 隔离各气泡，
-      // 静态气泡不随之重绘（整列表只有一个脏区域）
-      child: Align(
-        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
-          ),
-          child: Column(
-            crossAxisAlignment: align,
-            children: [
-              // 组首展开态的「收起」行（无卡片纯文本，与收纳行对称）+
-              // 同款短分割线（两个状态视觉一致）
-              if (_showToolCollapseBar != null) ...[
-                InkWell(
-                  borderRadius: BorderRadius.circular(6),
-                  onTap: _showToolCollapseBar,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      children: [
-                        Text(
-                          '调用工具',
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: Colors.grey.shade700,
-                                fontWeight: FontWeight.w600,
-                              ),
-                        ),
-                        const SizedBox(width: 4),
-                        // 180→0° 旋转（展开方向），与收纳行成对
-                        TweenAnimationBuilder<double>(
-                          tween: Tween(begin: 0.5, end: 0.0),
-                          duration: const Duration(milliseconds: 200),
-                          curve: Curves.easeOutCubic,
-                          builder: (_, t, child) =>
-                              Transform.rotate(angle: t * math.pi, child: child),
-                          child: Icon(
-                            Icons.expand_more,
-                            size: 18,
-                            color: Colors.grey.shade700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                Container(
-                  width: 88,
-                  height: 0.5,
-                  margin: const EdgeInsets.only(bottom: 6),
-                  color: Colors.grey.withValues(alpha: 0.3),
-                ),
-              ],
+    // 正文子项（思考块 / 气泡 / 工具卡 / 工具栏）——工具收纳组首
+    // 包进 AnimatedSwitcher，其余消息原样展开
+    final bodyChildren = <Widget>[
               // 思考过程区（仅 assistant 且有 thinking 时显示，折叠/展开）。
               // 思考深度关闭（0）时隐藏思考块——切换思考模式的实际可见效果；
               // 例外：输出被截断/停止时显示（未完成的过程需可见）
@@ -5314,6 +5203,101 @@ class _HomePageState extends State<HomePage>
                     ],
                   ),
                 ),
+    ];
+
+    return RepaintBoundary(
+      // 流式期间正在更新的气泡频繁重绘；RepaintBoundary 隔离各气泡，
+      // 静态气泡不随之重绘（整列表只有一个脏区域）
+      child: Align(
+        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+          ),
+          child: Column(
+            crossAxisAlignment: align,
+            children: [
+              // 「调用工具」统一行（组首两态同一元素 → 箭头真连续旋转；
+              // Kimi 式：文字在左、箭头靠右）
+              if (toolToggle != null)
+                InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: toolToggle,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Text(
+                          '调用工具',
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: Colors.grey.shade700,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
+                        const Spacer(),
+                        AnimatedRotation(
+                          turns: toolCollapsed ? 0.5 : 0.0,
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeOutCubic,
+                          child: Icon(
+                            Icons.expand_more,
+                            size: 18,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              // 内容区：收纳态（聚合图片 + 短分割线）↔ 展开态（正文）
+              // 交叉淡入淡出；高度由 _MessageItem 的 AnimatedSize 平滑
+              if (toolToggle != null)
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 200),
+                  switchInCurve: Curves.easeOut,
+                  switchOutCurve: Curves.easeIn,
+                  child: toolCollapsed
+                      ? KeyedSubtree(
+                          key: const ValueKey('toolCollapsed'),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (toolImgs.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    top: 2,
+                                    bottom: 6,
+                                  ),
+                                  child: SizedBox(
+                                    width: double.infinity,
+                                    child: _imageGrid(context, toolImgs),
+                                  ),
+                                ),
+                              Container(
+                                width: 88,
+                                height: 0.5,
+                                margin: const EdgeInsets.only(
+                                  top: 6,
+                                  bottom: 2,
+                                ),
+                                color: Colors.grey.withValues(alpha: 0.3),
+                              ),
+                            ],
+                          ),
+                        )
+                      : KeyedSubtree(
+                          key: const ValueKey('toolExpanded'),
+                          child: Column(
+                            crossAxisAlignment: align,
+                            mainAxisSize: MainAxisSize.min,
+                            children: bodyChildren,
+                          ),
+                        ),
+                )
+              else
+                ...bodyChildren,
             ],
           ),
         ),
