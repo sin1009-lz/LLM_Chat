@@ -1938,19 +1938,20 @@ class _HomePageState extends State<HomePage>
             'function': {'name': call.name, 'arguments': call.args},
           });
           // 卡片：工具名（去前缀）+ 参数摘要，挂在本轮气泡上。
-          // 内置工具名剥离 builtin__ 前缀。send_image 不出卡片——
-          // 图片直接挂到气泡里，再闪一个调用卡片是噪音
+          // 内置工具名剥离 builtin__ 前缀。send_image 出静默卡片：
+          // 不渲染（图片直接挂气泡），但标记该轮为工具轮——
+          // 否则该轮 toolCalls 为空会被当普通消息显示工具栏，
+          // 与最终回答的工具栏叠出两个
           final toolDef = toolMap[call.name];
           final displayName = call.name.startsWith('builtin__')
               ? call.name.substring('builtin__'.length)
               : (toolDef?.$2.name ?? call.name);
-          final card = call.name == kBuiltinSendImageTool
-              ? null
-              : ToolCallRecord(
-                  name: displayName,
-                  query: _summarizeArgs(call.args),
-                );
-          if (card != null) setState(() => current.toolCalls!.add(card));
+          final card = ToolCallRecord(
+            name: displayName,
+            query: _summarizeArgs(call.args),
+            silent: call.name == kBuiltinSendImageTool,
+          );
+          setState(() => current.toolCalls!.add(card));
 
           // 执行工具：内置工具走本地执行，MCP 工具走远程调用
           String resultText;
@@ -1973,14 +1974,12 @@ class _HomePageState extends State<HomePage>
                   ),
                 );
                 resultText = r.text.isEmpty ? '(空结果)' : r.text;
-                if (card != null) {
-                  card.output = resultText.length > 4000
-                      ? '${resultText.substring(0, 4000)}…'
-                      : resultText;
-                  // 图表不再挂卡片（与 send_image 发出的图重复）：
-                  // 需要用户看到时模型应 savefig + send_image
-                  card.images = null;
-                }
+                card.output = resultText.length > 4000
+                    ? '${resultText.substring(0, 4000)}…'
+                    : resultText;
+                // 图表不再挂卡片（与 send_image 发出的图重复）：
+                // 需要用户看到时模型应 savefig + send_image
+                card.images = null;
                 resultCode = resultText.length;
               } else if (call.name == kBuiltinSendImageTool) {
                 // 发图给用户：读 Python 保存的文件 → 挂到本条助手消息
@@ -2025,7 +2024,7 @@ class _HomePageState extends State<HomePage>
             finishOnStop();
             return;
           }
-          if (card != null) setState(() => card.resultCount = resultCode);
+          setState(() => card.resultCount = resultCode);
           toolMessages.add({
             'role': 'tool',
             'tool_call_id': toolCallId,
@@ -5908,7 +5907,11 @@ class _HomePageState extends State<HomePage>
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
   Widget _toolCallDivider(BuildContext context, Message m) {
-    final tcs = m.toolCalls ?? const <ToolCallRecord>[];
+    // 静默卡片（send_image）不渲染——它只用于标记"这是工具轮"
+    //（该轮不显示消息工具栏，避免一轮出现两个工具栏）
+    final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
+        .where((t) => !t.silent)
+        .toList();
     if (tcs.isEmpty) return const SizedBox.shrink();
     final grey = Colors.grey.shade700;
     final dark = Theme.of(context).brightness == Brightness.dark;

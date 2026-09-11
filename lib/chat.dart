@@ -389,6 +389,7 @@ class ToolCallRecord {
     this.output,
     this.images,
     this.expanded = false,
+    this.silent = false,
   });
 
   final String name;
@@ -408,6 +409,10 @@ class ToolCallRecord {
 
   /// 卡片展开态（显示完整输出/图片；瞬态）
   bool expanded;
+
+  /// 静默卡片（send_image）：不渲染分割块，仅标记该轮是工具轮
+  ///（据此隐藏消息工具栏）。瞬态不序列化
+  bool silent;
 
   Map<String, dynamic> toJson() => {
     'name': name,
