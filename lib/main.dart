@@ -4916,49 +4916,6 @@ class _HomePageState extends State<HomePage>
     final conv = _currentConversation;
     final isStreamingTarget =
         _isResponding && !isUser && conv != null && conv.messages.last == m;
-    // 工具收纳（Kimi 式分组折叠 · 步进收纳）：本轮不再是会话最后一
-    // 条消息时（新一轮气泡已开 / 已有最终回答）即收纳。整组收纳到
-    // 组首消息内的一个折叠块：统一「调用工具」行（两态同一元素，
-    // 箭头连续旋转）+ AnimatedSwitcher 内容交叉淡入；各轮图片聚合
-    // 保持可见。toolExpanded（挂组首，瞬态不持久化）为手动展开态
-    var toolCollapsed = false;
-    VoidCallback? toolToggle;
-    var toolImgs = const <ImagePart>[];
-    final isLastMsg = conv == null || conv.messages.last == m;
-    if (!isUser &&
-        !isLastMsg &&
-        (m.toolCalls?.isNotEmpty ?? false) &&
-        conv != null) {
-      // 组首 = 同段响应（向上扫到用户消息为止）的第一个工具轮
-      var g = index;
-      while (g > 0 &&
-          conv.messages[g - 1].role != Role.user &&
-          (conv.messages[g - 1].toolCalls?.isNotEmpty ?? false)) {
-        g--;
-      }
-      final groupFirst = conv.messages[g];
-      final imgs = <ImagePart>[];
-      for (var k = g; k < conv.messages.length; k++) {
-        final mk = conv.messages[k];
-        if (mk.role == Role.user || (mk.toolCalls?.isEmpty ?? true)) break;
-        imgs.addAll(mk.imageParts ?? const <ImagePart>[]);
-      }
-      if (!groupFirst.toolExpanded) {
-        // 组内非首：收纳态渲染为空（外层边距同步归零）
-        if (g != index) return const SizedBox.shrink();
-        toolCollapsed = true;
-        toolImgs = imgs;
-        toolToggle = () => setState(() {
-          groupFirst.toolExpanded = true;
-          _renderEpoch++;
-        });
-      } else if (g == index) {
-        toolToggle = () => setState(() {
-          groupFirst.toolExpanded = false;
-          _renderEpoch++;
-        });
-      }
-    }
     // 分支导航数据源：本消息自己的分支优先；工具轮次的分支挂在轮首
     // 工具轮气泡上，而工具轮不显示工具栏，所以在同轮次内向前找最近的
     // 带分支消息（工具轮锚点），把分支导航显示在轮次末尾的最终回答
@@ -4998,8 +4955,7 @@ class _HomePageState extends State<HomePage>
         onPickAttachments: _pickEditAttachments,
       );
     }
-    // 正文子项（思考块 / 气泡 / 工具卡 / 工具栏）——工具收纳组首
-    // 包进 AnimatedSwitcher，其余消息原样展开
+    // 正文子项（思考块 / 气泡 / 工具卡 / 工具栏）
     final bodyChildren = <Widget>[
               // 思考过程区（仅 assistant 且有 thinking 时显示，折叠/展开）。
               // 思考深度关闭（0）时隐藏思考块——切换思考模式的实际可见效果；
@@ -5216,89 +5172,7 @@ class _HomePageState extends State<HomePage>
           ),
           child: Column(
             crossAxisAlignment: align,
-            children: [
-              // 「调用工具」统一行（组首两态同一元素 → 箭头真连续旋转；
-              // Kimi 式：文字在左、箭头靠右）
-              if (toolToggle != null)
-                InkWell(
-                  borderRadius: BorderRadius.circular(6),
-                  onTap: toolToggle,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      children: [
-                        Text(
-                          '调用工具',
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: Colors.grey.shade700,
-                                fontWeight: FontWeight.w600,
-                              ),
-                        ),
-                        const Spacer(),
-                        AnimatedRotation(
-                          turns: toolCollapsed ? 0.5 : 0.0,
-                          duration: const Duration(milliseconds: 200),
-                          curve: Curves.easeOutCubic,
-                          child: Icon(
-                            Icons.expand_more,
-                            size: 18,
-                            color: Colors.grey.shade700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              // 内容区：收纳态（聚合图片 + 短分割线）↔ 展开态（正文）
-              // 交叉淡入淡出；高度由 _MessageItem 的 AnimatedSize 平滑
-              if (toolToggle != null)
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 200),
-                  switchInCurve: Curves.easeOut,
-                  switchOutCurve: Curves.easeIn,
-                  child: toolCollapsed
-                      ? KeyedSubtree(
-                          key: const ValueKey('toolCollapsed'),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (toolImgs.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(
-                                    top: 2,
-                                    bottom: 6,
-                                  ),
-                                  child: SizedBox(
-                                    width: double.infinity,
-                                    child: _imageGrid(context, toolImgs),
-                                  ),
-                                ),
-                              Container(
-                                width: 88,
-                                height: 0.5,
-                                margin: const EdgeInsets.only(
-                                  top: 6,
-                                  bottom: 2,
-                                ),
-                                color: Colors.grey.withValues(alpha: 0.3),
-                              ),
-                            ],
-                          ),
-                        )
-                      : KeyedSubtree(
-                          key: const ValueKey('toolExpanded'),
-                          child: Column(
-                            crossAxisAlignment: align,
-                            mainAxisSize: MainAxisSize.min,
-                            children: bodyChildren,
-                          ),
-                        ),
-                )
-              else
-                ...bodyChildren,
-            ],
+            children: bodyChildren,
           ),
         ),
       ),
@@ -6049,32 +5923,6 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
-  /// 该消息是否为「已折叠的工具轮组内非首成员」——此类消息渲染为空，
-  /// 外层边距也应归零（_MessageItem 调用；组首渲染摘要胶囊不算）
-  bool isCollapsedToolMember(Message m) {
-    if ((m.toolCalls?.isEmpty ?? true)) return false;
-    final conv = _currentConversation;
-    if (conv == null) return false;
-    // 步进收纳：最后一条消息（进行中的轮）不收纳
-    if (conv.messages.last == m) return false;
-    final i = conv.messages.indexOf(m);
-    if (i <= 0) return false;
-    final prev = conv.messages[i - 1];
-    // 前一条是用户消息或非工具轮 → 本条是组首（渲染胶囊）
-    if (prev.role == Role.user ||
-        (prev.toolCalls?.isEmpty ?? true)) {
-      return false;
-    }
-    // 组状态挂在组首：向上扫到组首取 toolExpanded
-    var g = i;
-    while (g > 0 &&
-        conv.messages[g - 1].role != Role.user &&
-        (conv.messages[g - 1].toolCalls?.isNotEmpty ?? false)) {
-      g--;
-    }
-    return !conv.messages[g].toolExpanded;
-  }
-
   Widget _toolCallDivider(BuildContext context, Message m) {
     // 静默卡片（send_image）不渲染——它只用于标记"这是工具轮"
     //（该轮不显示消息工具栏，避免一轮出现两个工具栏）
@@ -6100,59 +5948,31 @@ class _HomePageState extends State<HomePage>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 标签行（响应结束后可点击收起整轮为摘要胶囊）
-            InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: _isResponding
-                  ? null
-                  : () {
-                      // 收起整组：组状态挂在组首消息上
-                      final c = _currentConversation;
-                      if (c == null) return;
-                      final i = c.messages.indexOf(m);
-                      var g = i;
-                      while (g > 0 &&
-                          c.messages[g - 1].role != Role.user &&
-                          (c.messages[g - 1].toolCalls?.isNotEmpty ?? false)) {
-                        g--;
-                      }
-                      setState(() {
-                        c.messages[g].toolExpanded = false;
-                        _renderEpoch++;
-                      });
-                    },
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 2),
-                child: Row(
-                  children: [
-                    Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
-                    const SizedBox(width: 4),
-                    Text(
-                      '工具调用',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: grey,
-                        fontWeight: FontWeight.w600,
+            // 标签行
+            Row(
+              children: [
+                Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
+                const SizedBox(width: 4),
+                Text(
+                  '工具调用',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: grey,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                if (running)
+                  const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(strokeWidth: 1.6),
                       ),
-                    ),
-                    const Spacer(),
-                    if (running)
-                      const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SizedBox(
-                            width: 12,
-                            height: 12,
-                            child: CircularProgressIndicator(strokeWidth: 1.6),
-                          ),
-                          SizedBox(width: 4),
-                        ],
-                      ),
-                    if (!_isResponding)
-                      Icon(
-                        Icons.expand_less,
-                        size: 16,
-                        color: Colors.grey.shade700,
-                      ),
+                      SizedBox(width: 4),
+                    ],
+                  ),
                 Text(
                   running ? '调用中…' : '完成 ${tcs.length} 个工具',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -6161,8 +5981,6 @@ class _HomePageState extends State<HomePage>
                 ),
               ],
             ),
-            ),
-          ),
             const SizedBox(height: 4),
             // 每个工具一行
             for (final tc in tcs) _toolRow(context, tc),
@@ -8579,7 +8397,6 @@ class _MessageItemState extends State<_MessageItem> {
       (widget.message.toolCalls?.length ?? 0) * 101 +
       (widget.editing ? 9973 : 0) +
       (widget.branchEditing ? 9967 : 0) +
-      (widget.message.toolExpanded ? 9953 : 0) +
       (widget.message.truncated ? 9949 : 0) +
       (widget.message.error ? 9931 : 0) +
       (widget.streaming ? 9923 : 0) +
@@ -8604,27 +8421,9 @@ class _MessageItemState extends State<_MessageItem> {
   @override
   Widget build(BuildContext context) {
     final home = _HomePageScope.of(context);
-    // 工具轮包 AnimatedSize：响应结束后的整组折叠/展开动画。
-    // 流式期间零时长（气泡内容渐变增高若走动画会与滚动跟随错位）
-    // 折叠的组内成员：外边距归零（否则每条留 12px 空带，堆在胶囊图片
-    // 与最终回答之间 = 展开前后的空隙）。Padding/AnimatedSize 结构
-    // 保持连续，元素复用 → 展开动画不中断
-    final isToolRound = widget.message.toolCalls?.isNotEmpty ?? false;
-    final bubble = home.buildMessageBubble(context, widget.message, widget.index);
-    final hidden = home.isCollapsedToolMember(widget.message);
     return _cached ??= Padding(
-      padding: hidden ? EdgeInsets.zero : const EdgeInsets.only(bottom: 12),
-      child: isToolRound
-          ? AnimatedSize(
-              duration: widget.streaming
-                  ? Duration.zero
-                  : const Duration(milliseconds: 220),
-              reverseDuration: const Duration(milliseconds: 180),
-              curve: Curves.easeOutCubic,
-              alignment: Alignment.topLeft,
-              child: bubble,
-            )
-          : bubble,
+      padding: const EdgeInsets.only(bottom: 12),
+      child: home.buildMessageBubble(context, widget.message, widget.index),
     );
   }
 }
