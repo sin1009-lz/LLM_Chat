@@ -746,6 +746,10 @@ class _HomePageState extends State<HomePage>
   ///（与工具中间轮隔离）
   final List<ImagePart> _pendingToolImages = [];
 
+  /// 正在后台加载的会话 id（非 null 时消息区显示居中转圈，
+  /// 加载完成一次性贴上内容——首建长帧不落在抽屉动画里）
+  String? _loadingConvId;
+
   /// ReAct 循环运行中（await-for 无法被 cancel 中断，用标志位让循环自行退出）
   bool _isReactRunning = false;
 
@@ -4594,15 +4598,22 @@ class _HomePageState extends State<HomePage>
       return;
     }
     _openingConvId = c.id;
+    // 消息区立即转圈（后台 isolate 加载，主线程无负载），
+    // 加载完成且抽屉动画完全结束后一次性贴上内容——
+    // 列表首建的长帧不落在动画窗口里（动画卡顿的根源）
+    setState(() => _loadingConvId = c.id);
     final full = await _materialize(c);
-    if (!mounted || full == null || _openingConvId != c.id) return;
-    // 等抽屉基本收拢再换入：值 ≤0.25 时 easeOutQuart 尾段剩余位移
-    // 极小，长帧落在此处不可感知；完全收起则立即——比等动画完全
-    // 结束少 ~200ms 固定时延（此前每次切换都慢一拍的来源）
-    if (_drawerController.isAnimating && _drawerController.value > 0.25) {
+    if (!mounted || full == null || _openingConvId != c.id) {
+      if (mounted && _openingConvId == c.id) {
+        setState(() => _loadingConvId = null);
+      }
+      return;
+    }
+    // 等抽屉完全收起（转圈期间无感知延迟）
+    if (_drawerController.isAnimating) {
       final ready = Completer<void>();
       void listener() {
-        if (_drawerController.value <= 0.25 || !_drawerController.isAnimating) {
+        if (!_drawerController.isAnimating) {
           _drawerController.removeListener(listener);
           if (!ready.isCompleted) ready.complete();
         }
@@ -4610,10 +4621,11 @@ class _HomePageState extends State<HomePage>
       _drawerController.addListener(listener);
       await ready.future;
     }
-    // 让出一帧再换入：长帧发生在接近静止的画面上
+    // 让出一帧再贴上：长帧发生在静止的转圈画面上
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted || _openingConvId != c.id) return;
     setState(() {
+      _loadingConvId = null;
       _historyLongPressed = null;
       _currentId = c.id;
     });
@@ -4710,7 +4722,15 @@ class _HomePageState extends State<HomePage>
     // 内容少时天然顶部对齐）；上翻时 offset 保持 → 顶部锚定（文字不动）；
     // 贴底由 ChatScrollPosition 钉在新底部（底部生长）。
     // 消息正序：死区 → system 卡片 → 消息 1..N（最新在底部）
-    final listView = NotificationListener<ScrollNotification>(
+    final listView = _loadingConvId != null
+        ? Center(
+            child: SizedBox(
+              width: 32,
+              height: 32,
+              child: CircularProgressIndicator(strokeWidth: 2.4),
+            ),
+          )
+        : NotificationListener<ScrollNotification>(
       onNotification: _onScrollNotification,
       child: CustomScrollView(
         controller: _chatScroll,
@@ -4795,7 +4815,7 @@ class _HomePageState extends State<HomePage>
 
             // 空状态提示：新对话（无消息、无 system 提示词）时居中显示。
             // 区域限定在页眉与输入栏之间，不响应点击
-            if (messages.isEmpty && !showSystem)
+            if (messages.isEmpty && !showSystem && _loadingConvId == null)
               Positioned(
                 top: topPad,
                 left: 0,
