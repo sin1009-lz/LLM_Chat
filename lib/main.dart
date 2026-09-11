@@ -3999,19 +3999,21 @@ class _HomePageState extends State<HomePage>
     _openingConvId = c.id;
     final full = await _materialize(c);
     if (!mounted || full == null || _openingConvId != c.id) return;
-    // 等抽屉完全收起（animateTo(0) 结束于 dismissed）
-    if (_drawerController.isAnimating) {
-      final done = Completer<void>();
-      void onStatus(AnimationStatus s) {
-        if (s == AnimationStatus.completed || s == AnimationStatus.dismissed) {
-          _drawerController.removeStatusListener(onStatus);
-          if (!done.isCompleted) done.complete();
+    // 等抽屉基本收拢再换入：值 ≤0.25 时 easeOutQuart 尾段剩余位移
+    // 极小，长帧落在此处不可感知；完全收起则立即——比等动画完全
+    // 结束少 ~200ms 固定时延（此前每次切换都慢一拍的来源）
+    if (_drawerController.isAnimating && _drawerController.value > 0.25) {
+      final ready = Completer<void>();
+      void listener() {
+        if (_drawerController.value <= 0.25 || !_drawerController.isAnimating) {
+          _drawerController.removeListener(listener);
+          if (!ready.isCompleted) ready.complete();
         }
       }
-      _drawerController.addStatusListener(onStatus);
-      await done.future;
+      _drawerController.addListener(listener);
+      await ready.future;
     }
-    // 让出一帧再换入：长帧发生在静止画面上（内容出现），非动画中
+    // 让出一帧再换入：长帧发生在接近静止的画面上
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted || _openingConvId != c.id) return;
     setState(() {
