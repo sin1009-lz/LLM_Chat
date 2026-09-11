@@ -21,6 +21,19 @@ Map<String, dynamic>? _parseConversationFile(String path) {
   }
 }
 
+/// 会话文件全量解析（isolate 内执行）：读文件 + JSON 解码 +
+/// Conversation.fromJson（消息树/分支展开也不占主线程——归档大对话
+/// 时壳合并路径的主线程同步解析是卡顿来源）
+Conversation? _parseConversationFull(String path) {
+  try {
+    final j = _parseConversationFile(path);
+    if (j == null) return null;
+    return Conversation.fromJson(j);
+  } catch (_) {
+    return null;
+  }
+}
+
 /// 请求体 JSON 编码（isolate 内执行）：含 N 张 base64 图片的请求体
 /// 可达几十 MB，主线程同步编码是上传卡顿来源
 String _encodeRequestBody(Map<String, dynamic> body) => jsonEncode(body);
@@ -928,9 +941,7 @@ class ChatStore {
     try {
       final f = _file(id);
       if (!f.existsSync()) return null;
-      final json = await compute(_parseConversationFile, f.path);
-      if (json == null) return null;
-      return Conversation.fromJson(json);
+      return await compute(_parseConversationFull, f.path);
     } catch (_) {
       return null;
     }
@@ -940,7 +951,8 @@ class ChatStore {
     // 壳对象（元数据被修改，如自动归档/锁定/恢复）：从文件合并正文，
     // 防止把空消息列表写回文件丢数据
     if (!c.loaded) {
-      final existing = loadConversation(c.id);
+      // isolate 加载（大对话主线程同步解析 = 归档/锁定卡顿来源）
+      final existing = await loadConversationAsync(c.id);
       if (existing != null) {
         existing
           ..title = c.title
@@ -971,10 +983,12 @@ class ChatStore {
   }
 
   Future<void> rename(String id, String title) async {
-    final c = loadConversation(id);
+    // isolate 加载 + 编码：大对话重命名不在主线程解析/序列化
+    final c = await loadConversationAsync(id);
     if (c == null) return;
     c.title = title;
-    _file(id).writeAsStringSync(jsonEncode(c.toJson()));
+    final json = await compute(_encodeConversationJson, c);
+    _file(id).writeAsStringSync(json);
     final index = _readIndex();
     final i = index.indexWhere((e) => e['id'] == id);
     if (i >= 0) {
