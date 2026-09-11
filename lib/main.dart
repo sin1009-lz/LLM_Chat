@@ -7504,6 +7504,16 @@ class _GlassInputBarState extends State<_GlassInputBar> {
           ),
           child: Stack(
             children: [
+              // 白色模式下玻璃面偏灰一档：默认白色 tint 在浅色背景上
+              // 近纯白——垫一层极淡灰让输入框与背景拉开（暗色不动）
+              if (Theme.of(context).brightness != Brightness.dark)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: ColoredBox(
+                      color: Colors.grey.withValues(alpha: 0.10),
+                    ),
+                  ),
+                ),
               // 非定位占位：决定容器尺寸（激活时顶部让出输入栏空间 + 底部按钮行）。
               // _SizeReporter：布局阶段把动画中的真实容器高度逐帧上报给
               // 附件条（AnimatedContainer 隐式动画只改布局不回调，被动测量
