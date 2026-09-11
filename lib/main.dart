@@ -5981,7 +5981,6 @@ class _HomePageState extends State<HomePage>
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
   Widget _toolCallDivider(BuildContext context, Message m) {
     // 静默卡片（send_image）不渲染——它只用于标记"这是工具轮"
-    //（该轮不显示消息工具栏，避免一轮出现两个工具栏）
     final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
         .where((t) => !t.silent)
         .toList();
@@ -5990,46 +5989,119 @@ class _HomePageState extends State<HomePage>
     final dark = Theme.of(context).brightness == Brightness.dark;
     // 状态汇总：任一工具仍在执行（resultCount == null）→ 调用中
     final running = tcs.any((t) => t.resultCount == null);
-    // 调用完成后收起到一槽厚：单行「工具调用：名称 完成X个工具」，
-    // 点击展开/收起（运行中始终完整显示）
+    // 「完成 X 个工具」的成功色（蓝，两态样式统一）
+    final success = dark ? kSuccessColor : kSuccessColorLight;
+    // 调用完成后收起到一槽厚；运行中/手动展开为完整卡
     final collapsed = !running && !m.toolCardExpanded;
+    final labelSmall = Theme.of(context).textTheme.labelSmall;
+    final Widget content;
     if (collapsed) {
-      return Padding(
-        padding: const EdgeInsets.only(top: 6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => setState(() {
-            m.toolCardExpanded = true;
-            _renderEpoch++;
-          }),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: dark ? const Color(0xFF262626) : const Color(0xFFF2F2F2),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    '工具调用：${tcs.first.name} 完成${tcs.length}个工具',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+      content = InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => setState(() {
+          m.toolCardExpanded = true;
+          _renderEpoch++;
+        }),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            children: [
+              Icon(Icons.hub_outlined, size: 13, color: grey),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      // 名称部分灰色，完成数保持蓝色（与展开态一致）
+                      TextSpan(
+                        text: '工具调用：${tcs.first.name} ',
+                        style: labelSmall?.copyWith(
+                          color: grey,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      TextSpan(
+                        text: '完成${tcs.length}个工具',
+                        style: labelSmall?.copyWith(
+                          color: success,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Icon(Icons.expand_more, size: 16, color: grey),
+            ],
+          ),
+        ),
+      );
+    } else {
+      content = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 标签行（完成后可点击收起）
+          InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: running
+                ? null
+                : () => setState(() {
+                    m.toolCardExpanded = false;
+                    _renderEpoch++;
+                  }),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Icon(Icons.hub_outlined, size: 13, color: grey),
+                  const SizedBox(width: 4),
+                  Text(
+                    '工具调用',
+                    style: labelSmall?.copyWith(
                       color: grey,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                ),
-                Icon(Icons.expand_more, size: 16, color: Colors.grey.shade700),
-              ],
+                  const Spacer(),
+                  if (running)
+                    const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 1.6),
+                        ),
+                        SizedBox(width: 4),
+                      ],
+                    ),
+                  Text(
+                    running ? '调用中…' : '完成 ${tcs.length} 个工具',
+                    style: labelSmall?.copyWith(
+                      color: running ? grey : success,
+                    ),
+                  ),
+                  if (!running)
+                    Icon(Icons.expand_less, size: 16, color: grey),
+                ],
+              ),
             ),
           ),
-        ),
+          const SizedBox(height: 4),
+          // 全量展开（高度限制 360，工具很多时内部滚动）
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 360),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [for (final tc in tcs) _toolRow(context, tc)],
+              ),
+            ),
+          ),
+        ],
       );
     }
     return Padding(
@@ -6043,61 +6115,13 @@ class _HomePageState extends State<HomePage>
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 标签行（完成后可点击收起）
-            InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: running
-                  ? null
-                  : () => setState(() {
-                      m.toolCardExpanded = false;
-                      _renderEpoch++;
-                    }),
-              child: Row(
-                children: [
-                  Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
-                  const SizedBox(width: 4),
-                  Text(
-                    '工具调用',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: grey,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const Spacer(),
-                if (running)
-                  const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(strokeWidth: 1.6),
-                      ),
-                      SizedBox(width: 4),
-                    ],
-                  ),
-                Text(
-                  running ? '调用中…' : '完成 ${tcs.length} 个工具',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: running
-                          ? grey
-                          : (Theme.of(context).brightness == Brightness.dark
-                                ? kSuccessColor
-                                : kSuccessColorLight),
-                  ),
-                ),
-                if (!running)
-                  Icon(Icons.expand_less, size: 16, color: Colors.grey.shade700),
-              ],
-            ),
-            ),
-            const SizedBox(height: 4),
-            // 每个工具一行
-            for (final tc in tcs) _toolRow(context, tc),
-          ],
+        // 展开/收起动画：单一容器壳，内容切换由 AnimatedSize 平滑过渡
+        child: AnimatedSize(
+          alignment: Alignment.topLeft,
+          duration: const Duration(milliseconds: 220),
+          reverseDuration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          child: content,
         ),
       ),
     );
