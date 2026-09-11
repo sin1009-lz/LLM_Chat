@@ -530,6 +530,10 @@ class Message {
   /// 分支导航位置：0 = 最新分支（branches[0]）。仅视图态，不持久化
   int viewPos = 0;
 
+  /// 工具轮折叠态：true = 用户手动展开（响应结束后工具轮自动折叠为
+  /// 摘要胶囊）。仅视图态，不持久化——重载后回到自动折叠
+  bool toolExpanded = false;
+
   /// 图片部件（多模态；仅用户消息，原图 base64 持久化）
   List<ImagePart>? imageParts;
 

@@ -4902,6 +4902,75 @@ class _HomePageState extends State<HomePage>
     final conv = _currentConversation;
     final isStreamingTarget =
         _isResponding && !isUser && conv != null && conv.messages.last == m;
+    // 工具轮折叠：响应结束后，中间工具轮（含轮内文字/思考/工具卡）
+    // 自动收起为一行摘要胶囊；发送的图片保留可见；点击展开。
+    // 响应进行中保持展开（过程可见）；toolExpanded 为用户手动展开态
+    //（瞬态，重载后回到自动折叠）
+    if (!isUser &&
+        !_isResponding &&
+        (m.toolCalls?.isNotEmpty ?? false) &&
+        !m.toolExpanded) {
+      final all = m.toolCalls!;
+      final visible = all.where((t) => !t.silent).toList();
+      final names = visible
+          .map((t) => t.name)
+          .take(3)
+          .join('、');
+      final label = visible.isEmpty
+          ? '工具调用轮'
+          : '工具调用轮 · $names${visible.length > 3 ? ' 等 ${visible.length} 个' : ''}';
+      final grey = Colors.grey.shade700;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => setState(() {
+              m.toolExpanded = true;
+              _renderEpoch++; // 签名失效（epoch 在签名内）
+            }),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Theme.of(context).brightness == Brightness.dark
+                    ? const Color(0xFF262626)
+                    : const Color(0xFFF2F2F2),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.hub_outlined, size: 13, color: grey),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: grey,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Icon(Icons.expand_more, size: 16, color: grey),
+                ],
+              ),
+            ),
+          ),
+          // 发送的图片不随折叠隐藏（用户要看的内容）
+          if (m.imageParts?.isNotEmpty ?? false)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: SizedBox(
+                width: double.infinity,
+                child: _imageGrid(context, m.imageParts!),
+              ),
+            ),
+        ],
+      );
+    }
     // 分支导航数据源：本消息自己的分支优先；工具轮次的分支挂在轮首
     // 工具轮气泡上，而工具轮不显示工具栏，所以在同轮次内向前找最近的
     // 带分支消息（工具轮锚点），把分支导航显示在轮次末尾的最终回答
@@ -5931,31 +6000,47 @@ class _HomePageState extends State<HomePage>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 标签行
-            Row(
-              children: [
-                Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
-                const SizedBox(width: 4),
-                Text(
-                  '工具调用',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: grey,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                if (running)
-                  const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(strokeWidth: 1.6),
+            // 标签行（响应结束后可点击收起整轮为摘要胶囊）
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: _isResponding
+                  ? null
+                  : () => setState(() {
+                      m.toolExpanded = false;
+                      _renderEpoch++;
+                    }),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  children: [
+                    Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
+                    const SizedBox(width: 4),
+                    Text(
+                      '工具调用',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: grey,
+                        fontWeight: FontWeight.w600,
                       ),
-                      SizedBox(width: 4),
-                    ],
-                  ),
+                    ),
+                    const Spacer(),
+                    if (running)
+                      const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 1.6),
+                          ),
+                          SizedBox(width: 4),
+                        ],
+                      ),
+                    if (!_isResponding)
+                      Icon(
+                        Icons.expand_less,
+                        size: 16,
+                        color: Colors.grey.shade700,
+                      ),
                 Text(
                   running ? '调用中…' : '完成 ${tcs.length} 个工具',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -5964,6 +6049,8 @@ class _HomePageState extends State<HomePage>
                 ),
               ],
             ),
+            ),
+          ),
             const SizedBox(height: 4),
             // 每个工具一行
             for (final tc in tcs) _toolRow(context, tc),
@@ -8380,6 +8467,7 @@ class _MessageItemState extends State<_MessageItem> {
       (widget.message.toolCalls?.length ?? 0) * 101 +
       (widget.editing ? 9973 : 0) +
       (widget.branchEditing ? 9967 : 0) +
+      (widget.message.toolExpanded ? 9953 : 0) +
       (widget.message.truncated ? 9949 : 0) +
       (widget.message.error ? 9931 : 0) +
       (widget.streaming ? 9923 : 0) +
