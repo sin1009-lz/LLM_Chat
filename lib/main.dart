@@ -3962,6 +3962,16 @@ class _HomePageState extends State<HomePage>
   }
 
   @override
+  void didUpdateWidget(HomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 主题切换：消息项签名缓存不感知 Theme——不失效的话气泡里
+    // 混着旧主题的颜色（浅色/深色混合的根源）
+    if (oldWidget.isDark != widget.isDark) {
+      _renderEpoch++;
+    }
+  }
+
+  @override
   void initState() {
     super.initState();
     // 内存压力响应：系统内存紧张时清各级缓存
@@ -5980,6 +5990,48 @@ class _HomePageState extends State<HomePage>
     final dark = Theme.of(context).brightness == Brightness.dark;
     // 状态汇总：任一工具仍在执行（resultCount == null）→ 调用中
     final running = tcs.any((t) => t.resultCount == null);
+    // 调用完成后收起到一槽厚：单行「工具调用：名称 完成X个工具」，
+    // 点击展开/收起（运行中始终完整显示）
+    final collapsed = !running && !m.toolCardExpanded;
+    if (collapsed) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => setState(() {
+            m.toolCardExpanded = true;
+            _renderEpoch++;
+          }),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: dark ? const Color(0xFF262626) : const Color(0xFFF2F2F2),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    '工具调用：${tcs.first.name} 完成${tcs.length}个工具',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: grey,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Icon(Icons.expand_more, size: 16, color: Colors.grey.shade700),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Container(
@@ -5994,19 +6046,27 @@ class _HomePageState extends State<HomePage>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 标签行
-            Row(
-              children: [
-                Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
-                const SizedBox(width: 4),
-                Text(
-                  '工具调用',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: grey,
-                    fontWeight: FontWeight.w600,
+            // 标签行（完成后可点击收起）
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: running
+                  ? null
+                  : () => setState(() {
+                      m.toolCardExpanded = false;
+                      _renderEpoch++;
+                    }),
+              child: Row(
+                children: [
+                  Icon(Icons.hub_outlined, size: 13, color: Colors.grey.shade700),
+                  const SizedBox(width: 4),
+                  Text(
+                    '工具调用',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: grey,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-                const Spacer(),
+                  const Spacer(),
                 if (running)
                   const Row(
                     mainAxisSize: MainAxisSize.min,
@@ -6022,10 +6082,17 @@ class _HomePageState extends State<HomePage>
                 Text(
                   running ? '调用中…' : '完成 ${tcs.length} 个工具',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: running ? grey : kSuccessColor,
+                    color: running
+                          ? grey
+                          : (Theme.of(context).brightness == Brightness.dark
+                                ? kSuccessColor
+                                : kSuccessColorLight),
                   ),
                 ),
+                if (!running)
+                  Icon(Icons.expand_less, size: 16, color: Colors.grey.shade700),
               ],
+            ),
             ),
             const SizedBox(height: 4),
             // 每个工具一行
@@ -6060,7 +6127,11 @@ class _HomePageState extends State<HomePage>
             Icon(
               failed ? Icons.error_outline : Icons.check_circle_outline,
               size: 14,
-              color: failed ? Colors.redAccent : kSuccessColor,
+              color: failed
+                  ? Colors.redAccent
+                  : (Theme.of(context).brightness == Brightness.dark
+                        ? kSuccessColor
+                        : kSuccessColorLight),
             ),
           const SizedBox(width: 8),
           Expanded(

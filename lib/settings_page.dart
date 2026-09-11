@@ -1251,12 +1251,15 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
           child: CircularProgressIndicator(strokeWidth: 2, color: variant),
         );
       case 2:
-        return const Row(
+        final ok = Theme.of(context).brightness == Brightness.dark
+            ? kSuccessColor
+            : kSuccessColorLight;
+        return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.check_circle, size: 14, color: kSuccessColor),
-            SizedBox(width: 2),
-            Text('成功', style: TextStyle(fontSize: 11, color: kSuccessColor)),
+            Icon(Icons.check_circle, size: 14, color: ok),
+            const SizedBox(width: 2),
+            Text('成功', style: TextStyle(fontSize: 11, color: ok)),
           ],
         );
       case 3:
@@ -2857,12 +2860,15 @@ class _McpServerListPageState extends State<_McpServerListPage> {
       );
     }
     if (st == 2) {
-      return const Row(
+      final ok = Theme.of(context).brightness == Brightness.dark
+          ? kSuccessColor
+          : kSuccessColorLight;
+      return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.check_circle, size: 14, color: kSuccessColor),
-          SizedBox(width: 2),
-          Text('成功', style: TextStyle(fontSize: 11, color: kSuccessColor)),
+          Icon(Icons.check_circle, size: 14, color: ok),
+          const SizedBox(width: 2),
+          Text('成功', style: TextStyle(fontSize: 11, color: ok)),
         ],
       );
     }

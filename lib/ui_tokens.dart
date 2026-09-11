@@ -30,7 +30,9 @@ const kGapXl = 20.0;
 const kGapXxl = 24.0;
 
 // ── 语义色 ──
-const kSuccessColor = Color(0xFF4FC3F7); // 浅蓝（原绿 2E7D32）
+const kSuccessColor = Color(0xFF4FC3F7); // 浅蓝·暗色模式（原绿 2E7D32）
+// 浅色模式用深一档的蓝（4FC3F7 在白底上对比度不足，发灰看不清）
+const kSuccessColorLight = Color(0xFF0288D1);
 const kErrorColor = Color(0xFFC62828);
 const kSheetBgDark = Color(0xFF1C1C1E);
 

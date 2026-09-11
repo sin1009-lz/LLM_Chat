@@ -543,6 +543,10 @@ class Message {
   /// 分支导航位置：0 = 最新分支（branches[0]）。仅视图态，不持久化
   int viewPos = 0;
 
+  /// 工具卡展开态：调用完成后默认收起为一行（点击展开）。
+  /// 仅视图态，不持久化
+  bool toolCardExpanded = false;
+
   /// 图片部件（多模态；仅用户消息，原图 base64 持久化）
   List<ImagePart>? imageParts;
 
