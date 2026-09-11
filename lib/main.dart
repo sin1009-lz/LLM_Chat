@@ -947,6 +947,11 @@ class _HomePageState extends State<HomePage>
           maxSide: _imgMaxSide,
           quality: _imgQuality,
         );
+        if (aiBytes.isEmpty) {
+          // 压缩失败（原生 + Dart 回退都解不了，如 HEIC 变体）：
+          // 走兜底路径，不能把空/伪 jpeg 发给端点
+          throw StateError('image compress failed');
+        }
         // 前端小图：从 AI 档再缩（原生，快）
         Uint8List thumbBytes;
         try {
@@ -964,16 +969,22 @@ class _HomePageState extends State<HomePage>
         imgJobs.add(aiBytes);
         imgJobs.add(thumbBytes);
       } catch (_) {
-        // 兜底：原生压缩失败也不降级为文本——原图直传（保图片语义）
+        // 兜底：原生压缩失败——仅端点支持的格式（webp/png/jpeg/gif）
+        // 原图直传；其余（heic/bmp 等）直发会被整单 400，降级文件名
+        // 占位并提示
         try {
           final bytes = await att.readBytes();
           if (bytes.isNotEmpty) {
             final mime = _mimeFromName(att.name);
-            imgJobs.add(att.name);
-            imgJobs.add(bytes);
-            imgJobs.add(null);
-            imgJobs.add(mime);
-            continue;
+            const supported = {'image/webp', 'image/png', 'image/jpeg', 'image/gif'};
+            if (supported.contains(mime)) {
+              imgJobs.add(att.name);
+              imgJobs.add(bytes);
+              imgJobs.add(null);
+              imgJobs.add(mime);
+              continue;
+            }
+            _toast('${att.name} 格式不受模型支持（HEIC 等），请转换为 JPG 后重试');
           }
         } catch (_) {}
         nameParts.add(att.name);
@@ -10691,7 +10702,7 @@ Uint8List _compressSingleImageDart(Map<String, dynamic> args) {
   final maxSide = (args['maxSide'] as num).toDouble();
   final quality = args['quality'] as int;
   final decoded = im.decodeImage(bytes);
-  if (decoded == null) return bytes;
+  if (decoded == null) return Uint8List(0); // 空 = 失败：原始字节直发会被端点 400
   var img = decoded;
   if (img.width > maxSide || img.height > maxSide) {
     img = im.copyResize(
