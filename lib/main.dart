@@ -5121,14 +5121,28 @@ class _HomePageState extends State<HomePage>
       final c = _pendingPersist;
       _pendingPersist = null;
       if (c == null) return;
-      try {
-        await _store?.save(c);
-      } catch (_) {
-        // 存储失败（磁盘满，含原图 base64 大消息）：提示但不崩溃
-        _toast('存储空间不足，消息未能保存');
-      }
+      // 串行链：上一次写盘（大对话 isolate 编码可能 > 防抖周期）完成前
+      // 不并发写同一文件。then 同步注册——无交错窗口
+      final op = _persistChain.then((_) async {
+        try {
+          await _store?.save(c);
+        } catch (e) {
+          // 真实异常带类型上报（此前一律"存储空间不足"误报）
+          final msg = e.toString();
+          _toast(
+            msg.contains('No space')
+                ? '存储空间不足，消息未能保存'
+                : '保存失败：${msg.length > 60 ? '${msg.substring(0, 60)}…' : msg}',
+          );
+        }
+      });
+      _persistChain = op;
+      await op;
     });
   }
+
+  /// 落盘串行链（保证同一时刻只有一次写盘在执行）
+  Future<void> _persistChain = Future.value();
 
   /// 消息快照（分支锚点用）：复制内容/思考/错误/历史版本/图片/文件/工具记录，
   /// 不含分支与视图位

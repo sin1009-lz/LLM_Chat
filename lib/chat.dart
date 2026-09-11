@@ -563,7 +563,9 @@ class Message {
     return content.trim().isEmpty ? blocks : '$blocks\n\n$content';
   }
 
-  Map<String, dynamic> toJson() => {
+  /// [withBranches] false 时省略 branches（Conversation.toJson 的
+  /// 去重序列化专用：分支尾以索引引用形式由外层统一写入）
+  Map<String, dynamic> toJson({bool withBranches = true}) => {
     'role': role.index,
     'content': content,
     'thinking': thinking,
@@ -573,7 +575,7 @@ class Message {
     'viewPos': viewPos,
     if (versions != null && versions!.isNotEmpty)
       'versions': versions!.map((v) => v.toJson()).toList(),
-    if (branches != null && branches!.isNotEmpty)
+    if (withBranches && branches != null && branches!.isNotEmpty)
       'branches': branches!.map((b) => b.toJson()).toList(),
     if (imageParts != null && imageParts!.isNotEmpty)
       'imageParts': imageParts!.map((p) => p.toJson()).toList(),
@@ -679,26 +681,104 @@ class Conversation {
   /// 会话级内置工具开关（时间/位置）：null = 跟随全局设置
   bool? builtinToolsEnabled;
 
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'title': title,
-    'messages': messages.map((m) => m.toJson()).toList(),
-    'updatedAt': updatedAt.toIso8601String(),
-    'modelId': modelId,
-    if (systemPrompt != null) 'systemPrompt': systemPrompt,
-    if (mcpServerIds != null) 'mcpServerIds': mcpServerIds,
-    'archived': archived,
-    'locked': locked,
-    if (archivedAt != null) 'archivedAt': archivedAt!.toIso8601String(),
-    if (builtinToolsEnabled != null) 'builtinToolsEnabled': builtinToolsEnabled,
-  };
+  Map<String, dynamic> toJson() {
+    // fmt 2：分支尾去重——tail 存消息索引引用而非全量副本。
+    // 此前同一消息在每个分支尾都被完整序列化一遍（O(分支×消息)，
+    // 图片 base64 一并翻倍），长对话多分支时 JSON 平方级膨胀，
+    // 编码内存暴涨/文件巨大 → 保存失败（被误报"存储空间不足"）。
+    // 主列表编号 0..n-1；仅存在于其他时间线的消息进 extraMsgs 池
+    final extra = <Message>[];
+    final ids = Expando<int>();
+    for (var i = 0; i < messages.length; i++) {
+      ids[messages[i]] = i;
+    }
+    int refOf(Message m) {
+      final r = ids[m];
+      if (r != null) return r;
+      for (var k = 0; k < extra.length; k++) {
+        if (identical(extra[k], m)) return messages.length + k;
+      }
+      extra.add(m);
+      return messages.length + extra.length - 1;
+    }
 
-  factory Conversation.fromJson(Map<String, dynamic> j) => Conversation(
+    Map<String, dynamic> msgJson(Message m) {
+      final j = m.toJson(withBranches: false);
+      final b = m.branches;
+      if (b != null && b.isNotEmpty) {
+        j['branches'] = b
+            .map(
+              (br) => {
+                'anchor': br.anchor.toJson(),
+                'tail': br.tail.map(refOf).toList(),
+              },
+            )
+            .toList();
+      }
+      return j;
+    }
+
+    return {
+      'id': id,
+      'title': title,
+      'fmt': 2,
+      'messages': messages.map(msgJson).toList(),
+      if (extra.isNotEmpty) 'extraMsgs': extra.map((m) => m.toJson()).toList(),
+      'updatedAt': updatedAt.toIso8601String(),
+      'modelId': modelId,
+      if (systemPrompt != null) 'systemPrompt': systemPrompt,
+      if (mcpServerIds != null) 'mcpServerIds': mcpServerIds,
+      'archived': archived,
+      'locked': locked,
+      if (archivedAt != null) 'archivedAt': archivedAt!.toIso8601String(),
+      if (builtinToolsEnabled != null) 'builtinToolsEnabled': builtinToolsEnabled,
+    };
+  }
+
+  /// v2 索引引用 → v1 全量形状展开（复用既有解析路径）。
+  /// 引用替换为源消息 map（不拷贝：源自身也在主列表里，同趟完成
+  /// 其引用展开，天然收敛；fromJson 为每次出现建独立 Message，
+  /// 与 v1 语义一致——分支尾与主列表不共享对象）
+  static Map<String, dynamic> _expandV2(Map<String, dynamic> j) {
+    final msgs = (j['messages'] as List).cast<Map<String, dynamic>>();
+    final extra =
+        ((j['extraMsgs'] as List?) ?? const [])
+            .cast<Map<String, dynamic>>();
+    Object? resolve(Object e) {
+      if (e is Map) return e; // 混排的完整对象原样保留
+      if (e is! int) return null;
+      if (e >= 0 && e < msgs.length) return msgs[e];
+      final k = e - msgs.length;
+      return k >= 0 && k < extra.length ? extra[k] : null;
+    }
+
+    for (final m in msgs) {
+      final bs = m['branches'] as List?;
+      if (bs == null) continue;
+      for (final b in bs.cast<Map<String, dynamic>>()) {
+        final tail = b['tail'] as List?;
+        if (tail == null) continue;
+        b['tail'] = [
+          for (final e in tail)
+            if (resolve(e) case final r?) r,
+        ];
+      }
+    }
+    j.remove('extraMsgs');
+    return j;
+  }
+
+  factory Conversation.fromJson(Map<String, dynamic> j) {
+    // v2：分支尾索引引用先展开回 v1 全量形状（复用既有解析路径）
+    final data = (j['fmt'] as int? ?? 1) >= 2 ? _expandV2(j) : j;
+    final msgs =
+        (data['messages'] as List)
+            .map((m) => Message.fromJson(m as Map<String, dynamic>))
+            .toList();
+    return Conversation(
     id: j['id'] as String,
     title: j['title'] as String,
-    messages: (j['messages'] as List)
-        .map((m) => Message.fromJson(m as Map<String, dynamic>))
-        .toList(),
+    messages: msgs,
     updatedAt: DateTime.parse(j['updatedAt'] as String),
     modelId: j['modelId'] as String?,
     systemPrompt: j['systemPrompt'] as String?,
@@ -713,6 +793,7 @@ class Conversation {
     builtinToolsEnabled: j['builtinToolsEnabled'] as bool?,
     loaded: true,
   );
+  }
 }
 
 /// 持久化封装：会话正文存独立文件（`convs/<id>.json`），SharedPreferences
