@@ -5170,17 +5170,22 @@ class _HomePageState extends State<HomePage>
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 思考过程区（仅 assistant 且有 thinking 时显示）：全宽——
-          // 不受气泡 82% 宽度约束，折叠/展开均为整行
+          // 思考过程区（仅 assistant 且有 thinking 时显示）：宽度上限与
+          // 气泡一致（82%，最少 260），靠左填满——折叠/展开宽度统一
           if (!isUser &&
               (_thinkingDepth > 0 || m.truncated) &&
               (m.displayThinking?.isNotEmpty ?? false))
-            SizedBox(
-              width: double.infinity,
-              child: _thinkingBlock(
-                context,
-                _displayCached(m.displayThinking!),
-                streaming: isStreamingTarget,
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+              ),
+              child: SizedBox(
+                width: double.infinity,
+                child: _thinkingBlock(
+                  context,
+                  _displayCached(m.displayThinking!),
+                  streaming: isStreamingTarget,
+                ),
               ),
             ),
           // 气泡区：用户消息靠右、助手靠左，宽度上限 82%
