@@ -6008,31 +6008,27 @@ class _HomePageState extends State<HomePage>
             children: [
               Icon(Icons.hub_outlined, size: 13, color: grey),
               const SizedBox(width: 4),
+              // 名称灰色靠左（超长省略），完成数蓝色右对齐（同展开态布局）
               Expanded(
-                child: Text.rich(
-                  TextSpan(
-                    children: [
-                      // 名称部分灰色，完成数保持蓝色（与展开态一致）
-                      TextSpan(
-                        text: '工具调用：${tcs.first.name} ',
-                        style: labelSmall?.copyWith(
-                          color: grey,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      TextSpan(
-                        text: '完成${tcs.length}个工具',
-                        style: labelSmall?.copyWith(
-                          color: success,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
+                child: Text(
+                  '工具调用：${tcs.first.name}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
+                  style: labelSmall?.copyWith(
+                    color: grey,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
+              const Spacer(),
+              Text(
+                '完成${tcs.length}个工具',
+                style: labelSmall?.copyWith(
+                  color: success,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 2),
               Icon(Icons.expand_more, size: 16, color: grey),
             ],
           ),
