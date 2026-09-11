@@ -5431,16 +5431,33 @@ class _HomePageState extends State<HomePage>
         onPickAttachments: _pickEditAttachments,
       );
     }
-    // 轮次收纳：新一轮开启后（不再是最后一条消息），本轮的正文+
-    // 工具调用收录为一张卡（卡内横线分割），替代普通气泡形态
+    // 轮次收纳：新一轮开启后（不再是最后一条消息），本段响应的全部
+    // 已完成轮次（含思考）收录为一张卡（组首渲染，其余组员为空）
     final isLastMsg = conv == null || conv.messages.last == m;
     final roundCollected =
         !isUser && !isLastMsg && (m.toolCalls?.isNotEmpty ?? false);
+    List<Message> groupRounds = const [];
+    if (roundCollected && conv != null) {
+      var g = index;
+      while (g > 0 &&
+          conv.messages[g - 1].role != Role.user &&
+          (conv.messages[g - 1].toolCalls?.isNotEmpty ?? false)) {
+        g--;
+      }
+      final rounds = <Message>[];
+      for (var k = g; k < conv.messages.length; k++) {
+        final mk = conv.messages[k];
+        if (mk.role == Role.user || (mk.toolCalls?.isEmpty ?? true)) break;
+        rounds.add(mk);
+      }
+      groupRounds = rounds;
+      if (g != index) return const SizedBox.shrink(); // 组内非首：为空
+    }
     // 正文子项（气泡 / 工具卡 / 工具栏；思考块已提为全宽，见 return）
     final bodyChildren = <Widget>[
-              // 轮次收纳卡：前一轮内容（正文+工具）收录一卡，横线分割
+              // 轮次收纳卡：全部已完成轮次（含思考）收录一卡
               if (roundCollected)
-                _toolRoundCard(context, m)
+                _roundsCollectedCard(context, groupRounds)
               // 气泡本体（无阴影；助手灰色、用户品牌蓝）。
               // 无正式内容（仅工具调用）时不渲染；正在流式接收（打字点）除外
               else if (hasBubbleContent || isStreamingTarget)
@@ -5645,7 +5662,8 @@ class _HomePageState extends State<HomePage>
         children: [
           // 思考过程区（仅 assistant 且有 thinking 时显示）：宽度上限与
           // 气泡一致（82%，最少 260），靠左填满——折叠/展开宽度统一
-          if (!isUser &&
+          if (!roundCollected &&
+              !isUser &&
               (_thinkingDepth > 0 || m.truncated) &&
               (m.displayThinking?.isNotEmpty ?? false))
             ConstrainedBox(
@@ -6441,6 +6459,22 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
+  /// 该消息是否为「已收纳轮次组的非首成员」（渲染为空 + 外边距归零；
+  /// 卡片由组首渲染）
+  bool isCollapsedToolMember(Message m) {
+    if ((m.toolCalls?.isEmpty ?? true)) return false;
+    final conv = _currentConversation;
+    if (conv == null) return false;
+    if (conv.messages.last == m) return false; // 进行中的轮
+    final i = conv.messages.indexOf(m);
+    if (i <= 0) return false;
+    final prev = conv.messages[i - 1];
+    if (prev.role == Role.user || (prev.toolCalls?.isEmpty ?? true)) {
+      return false; // 组首（渲染卡片）
+    }
+    return true;
+  }
+
   Widget _toolCallDivider(BuildContext context, Message m) {
     // 静默卡片（send_image）不渲染——它只用于标记"这是工具轮"
     final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
@@ -6568,14 +6602,83 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  /// 轮次收纳卡：新一轮开启后，前一轮的正文 + 工具调用收录为一张卡，
-  /// 卡内条目之间以横线分割（thinking 块仍在其上方独立显示）
-  Widget _toolRoundCard(BuildContext context, Message m) {
+  /// 轮次收纳卡：本段响应的全部已完成轮次（含思考）收录为一张卡，
+  /// 轮与轮之间以横线分割；由组首消息渲染，组内其余消息渲染为空
+  Widget _roundsCollectedCard(BuildContext context, List<Message> rounds) {
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
-        .where((t) => !t.silent)
-        .toList();
-    final hasText = m.content.trim().isNotEmpty;
+    final children = <Widget>[];
+    for (var i = 0; i < rounds.length; i++) {
+      final m = rounds[i];
+      if (i > 0) {
+        // 轮与轮之间的横线分割
+        children.add(
+          Container(
+            height: 0.5,
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            color: Colors.grey.withValues(alpha: 0.3),
+          ),
+        );
+      }
+      final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
+          .where((t) => !t.silent)
+          .toList();
+      final hasText = m.content.trim().isNotEmpty;
+      final hasThinking = m.displayThinking?.trim().isNotEmpty ?? false;
+      // 思考块（自带折叠交互，入卡收纳）
+      if (hasThinking)
+        children.add(
+          _thinkingBlock(
+            context,
+            _displayCached(m.displayThinking!),
+            streaming: false,
+          ),
+        );
+      if (hasThinking && (hasText || tcs.isNotEmpty))
+        children.add(const SizedBox(height: 6));
+      // 本轮正文（无壳直接渲染，与卡同底）
+      if (hasText)
+        children.add(
+          _general.markdownEnabled
+              ? MarkdownView(
+                  text: _displayCached(m.displayContent),
+                  latexEnabled: _general.latexEnabled,
+                  mermaidEnabled: _general.mermaidEnabled,
+                  artifactsEnabled: _general.artifactsEnabled,
+                )
+              : SelectableText(
+                  _displayCached(m.displayContent),
+                  style: Theme.of(context).textTheme.bodyLarge,
+                ),
+        );
+      // 正文与工具之间的横线
+      if (hasText && tcs.isNotEmpty)
+        children.add(
+          Container(
+            height: 0.5,
+            margin: const EdgeInsets.symmetric(vertical: 8),
+            color: Colors.grey.withValues(alpha: 0.3),
+          ),
+        );
+      // 图片（如有）
+      if (m.imageParts?.isNotEmpty ?? false)
+        children.add(
+          SizedBox(
+            width: double.infinity,
+            child: _imageGrid(context, m.imageParts!),
+          ),
+        );
+      // 工具部分（收起/展开逻辑复用）
+      if (tcs.isNotEmpty)
+        children.add(
+          AnimatedSize(
+            alignment: Alignment.topLeft,
+            duration: const Duration(milliseconds: 220),
+            reverseDuration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            child: _toolDividerContent(context, m),
+          ),
+        );
+    }
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -6587,43 +6690,7 @@ class _HomePageState extends State<HomePage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
-        children: [
-          // 本轮正文（无壳直接渲染，与卡同底）
-          if (hasText)
-            _general.markdownEnabled
-                ? MarkdownView(
-                    text: _displayCached(m.displayContent),
-                    latexEnabled: _general.latexEnabled,
-                    mermaidEnabled: _general.mermaidEnabled,
-                    artifactsEnabled: _general.artifactsEnabled,
-                  )
-                : SelectableText(
-                    _displayCached(m.displayContent),
-                    style: Theme.of(context).textTheme.bodyLarge,
-                  ),
-          // 条目间横线分割
-          if (hasText && tcs.isNotEmpty)
-            Container(
-              height: 0.5,
-              margin: const EdgeInsets.symmetric(vertical: 8),
-              color: Colors.grey.withValues(alpha: 0.3),
-            ),
-          // 图片（如有）
-          if (m.imageParts?.isNotEmpty ?? false)
-            SizedBox(
-              width: double.infinity,
-              child: _imageGrid(context, m.imageParts!),
-            ),
-          // 工具部分（复用分隔块的收起/展开逻辑）
-          if (tcs.isNotEmpty)
-            AnimatedSize(
-              alignment: Alignment.topLeft,
-              duration: const Duration(milliseconds: 220),
-              reverseDuration: const Duration(milliseconds: 180),
-              curve: Curves.easeOutCubic,
-              child: _toolDividerContent(context, m),
-            ),
-        ],
+        children: children,
       ),
     );
   }
@@ -9087,8 +9154,10 @@ class _MessageItemState extends State<_MessageItem> {
   @override
   Widget build(BuildContext context) {
     final home = _HomePageScope.of(context);
+    // 已收纳轮次的组内非首成员：外边距归零（渲染为空，不留空带）
+    final hidden = home.isCollapsedToolMember(widget.message);
     return _cached ??= Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: hidden ? EdgeInsets.zero : const EdgeInsets.only(bottom: 12),
       child: home.buildMessageBubble(context, widget.message, widget.index),
     );
   }
