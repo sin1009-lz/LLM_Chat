@@ -8040,8 +8040,6 @@ class _GlassInputBarState extends State<_GlassInputBar> {
   /// 输入栏当前高度：按键时用 TextPainter 同步估算（无布局、无卡顿）
   double _inputHeight = 48;
 
-  /// 上一帧键盘 inset（键盘动画进行中检测用）
-  double _lastInset = 0;
 
   @override
   void initState() {
@@ -8139,11 +8137,6 @@ class _GlassInputBarState extends State<_GlassInputBar> {
     final rawInset = _focusNode.hasFocus
         ? math.min(MediaQuery.viewInsetsOf(context).bottom, winH * 0.6)
         : 0.0;
-    // 键盘动画进行中（inset 逐帧变化）→ 零时长直接跟随，精确贴键盘；
-    // 稳定后（含失焦瞬间目标归零）→ 走平滑过渡
-    final insetAnimating =
-        _focusNode.hasFocus && (rawInset - _lastInset).abs() > 0.5;
-    _lastInset = rawInset;
     final keyboardInset = rawInset;
     // 宽度保护：布局早期 MediaQuery 宽度可能为 0，防止负宽度崩溃
     final containerWidth = (MediaQuery.sizeOf(context).width - _hMargin * 2)
@@ -8175,7 +8168,7 @@ class _GlassInputBarState extends State<_GlassInputBar> {
       // 失焦时 keyboardInset 瞬间归零，用 300ms 隐式动画平滑下移，
       // 避免输入栏直接跳到底部、大小过渡动画被跳位掩盖
       child: AnimatedPadding(
-        duration: insetAnimating
+        duration: _focusNode.hasFocus
             ? Duration.zero
             : const Duration(milliseconds: 300),
         curve: Curves.easeOut,
