@@ -1289,10 +1289,14 @@ class LlmService {
   }
 
   /// 消息 content 载荷：有图片 → OpenAI 多模态数组；否则纯文本字符串。
-  /// 文件部件（文本附件）内容已并入 modelContent
+  /// 文件部件（文本附件）内容已并入 modelContent。
+  /// 仅用户消息的图片进载荷——助手图片是 send_image 工具发给用户看的，
+  /// 回传 image_url 会被多数端点 400（assistant 角色不支持图像内容）
   Object _contentPayload(Message m) {
     final images = m.imageParts;
-    if (images == null || images.isEmpty) return m.modelContent;
+    if (m.role != Role.user || images == null || images.isEmpty) {
+      return m.modelContent;
+    }
     return [
       {'type': 'text', 'text': m.modelContent},
       ...images.map(

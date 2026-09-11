@@ -31,6 +31,17 @@
     return pyodideReady;
   }
 
+  // 读 Pyodide 虚拟文件系统里的文件 → base64（builtin__send_image 用：
+  // 模型先用 run_python 把图保存到 FS，再调工具发给用户）
+  window.readPyFile = function(p) {
+    try {
+      const data = pyodide.FS.readFile(p);
+      let bin = '';
+      for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
+      return btoa(bin);
+    } catch (e) { return ''; }
+  };
+
   async function runPython(id, code) {
     let out = '', err = '';
     const reply = (obj) => {

@@ -1147,6 +1147,7 @@ class _HomePageState extends State<HomePage>
   static const kBuiltinLocationTool = 'builtin__get_location';
   static const kBuiltinSearchTool = 'builtin__web_search';
   static const kBuiltinPythonTool = 'builtin__run_python';
+  static const kBuiltinSendImageTool = 'builtin__send_image';
 
   /// 内置工具开关（当前对话生效值：会话级 ?? 全局）
   bool get _builtinToolsEffective {
@@ -1188,6 +1189,8 @@ class _HomePageState extends State<HomePage>
         if (_general.builtinLocationEnabled) _builtinToolDefs[1],
         if (_general.builtinSearchEnabled) _builtinToolDefs[2],
         if (_general.builtinPythonEnabled) _builtinToolDefs[3],
+        // 发图工具依赖 Python 内核产文件，同一开关
+        if (_general.builtinPythonEnabled) _builtinToolDefs[4],
       ]);
     }
     // 会话级 MCP 配置：null = 跟随全局（所有 enabled）；非 null = 仅该会话启用的 id
@@ -1227,6 +1230,7 @@ class _HomePageState extends State<HomePage>
   /// - 获取设备地理位置（经纬度，需定位权限）
   /// - 联网搜索（DeepSeek Anthropic 兼容端点原生 web_search 服务端工具）
   /// - 运行 Python（本地 Pyodide 沙箱，支持 matplotlib 产图）
+  /// - 发送图片给用户（读取 Python 保存的文件，显示在聊天气泡）
   static final List<Map<String, dynamic>> _builtinToolDefs = [
     {
       'type': 'function',
@@ -1284,6 +1288,32 @@ class _HomePageState extends State<HomePage>
             },
           },
           'required': ['code'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': kBuiltinSendImageTool,
+        'description':
+            '把一张图片发送给用户（显示在聊天中）。图片来源：先用 '
+            'run_python 生成并保存的图片文件（如 plt.savefig("out.png")、'
+            'PIL 的 im.save("a.jpg")）。当用户要你画图/生成图片/输出图像、'
+            '或你产出的图表需要用户直接看到时调用。每次发送一张，'
+            '多张图多次调用。',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'path': {
+              'type': 'string',
+              'description': 'Python 里保存的图片文件路径（如 out.png）',
+            },
+            'caption': {
+              'type': 'string',
+              'description': '图片说明（可选，简短一句话）',
+            },
+          },
+          'required': ['path'],
         },
       },
     },
@@ -1551,6 +1581,57 @@ class _HomePageState extends State<HomePage>
     }
   }
 
+  /// 发图工具：读 Pyodide 虚拟文件系统里的图片文件（模型先用
+  /// run_python 保存，如 plt.savefig）→ ImagePart 挂到本条助手消息，
+  /// 聊天气泡直接显示；返回给模型的确认文本（成功以
+  /// [图片已发送 开头，调度侧据此判定成败）
+  Future<String> _sendImageTool(
+    Message target,
+    String path, {
+    String caption = '',
+  }) async {
+    final p = path.trim();
+    if (p.isEmpty) return '[发送失败：path 参数为空]';
+    try {
+      await _ensurePyKernel();
+      final k = _pyKernel;
+      if (k == null) return '[发送失败：Python 内核未就绪]';
+      final r = await k.runJavaScriptReturningResult(
+        'window.readPyFile ? window.readPyFile(${jsonEncode(p)}) : ""',
+      );
+      var b64 = r.toString();
+      // Android 侧返回带引号的字符串字面量
+      if (b64.length >= 2 && b64.startsWith('"') && b64.endsWith('"')) {
+        b64 = b64.substring(1, b64.length - 1);
+      }
+      if (b64.isEmpty) {
+        return '[发送失败：文件不存在（$p）。请先用 run_python 保存图片，'
+            '例如 plt.savefig("$p", dpi=110)]';
+      }
+      final bytes = base64Decode(b64);
+      if (bytes.isEmpty) return '[发送失败：文件为空]';
+      if (bytes.length > 8 << 20) return '[发送失败：图片超过 8MB，请压缩后重试]';
+      final mime = _mimeFromName(p);
+      final name = p.split('/').last;
+      if (!mounted) return '[发送失败：页面已退出]';
+      setState(() {
+        target.imageParts = [
+          ...?target.imageParts,
+          ImagePart(
+            name: name,
+            mimeType: mime,
+            dataUrl: 'data:$mime;base64,$b64',
+          ),
+        ];
+      });
+      final kb = (bytes.length / 1024).round();
+      return '[图片已发送给用户：$name（$kb KB）'
+          '${caption.isEmpty ? '' : '，说明：$caption'}]';
+    } catch (e) {
+      return '[发送失败：$e]';
+    }
+  }
+
   /// DeepSeek 原生联网搜索（Anthropic 兼容端点 + web_search_20250305
   /// 服务端工具，同 @deepseek-ai/dsh-web-search-deepseek 的做法）：
   /// 一次完整 Messages 调用，由 DeepSeek 服务器执行搜索，解析
@@ -1680,7 +1761,11 @@ class _HomePageState extends State<HomePage>
   /// LlmService._contentPayload 一致）；否则纯文本
   Object _reactContentPayload(Message m) {
     final images = m.imageParts;
-    if (images == null || images.isEmpty) return m.modelContent;
+    // 仅用户图片进载荷（同 LlmService._contentPayload）：助手图片是
+    // send_image 工具发给用户看的，回传会被端点 400
+    if (m.role != Role.user || images == null || images.isEmpty) {
+      return m.modelContent;
+    }
     return [
       {'type': 'text', 'text': m.modelContent},
       ...images.map(
@@ -1876,6 +1961,22 @@ class _HomePageState extends State<HomePage>
                     : resultText;
                 card.images = r.images.isNotEmpty ? List.of(r.images) : null;
                 resultCode = resultText.length;
+              } else if (call.name == kBuiltinSendImageTool) {
+                // 发图给用户：读 Python 保存的文件 → 挂到本条助手消息
+                // 的 imageParts（聊天气泡显示）；60s 超时兜底
+                final r = await _sendImageTool(
+                  current,
+                  (args['path'] as String?) ?? '',
+                  caption: (args['caption'] as String?) ?? '',
+                ).timeout(
+                  const Duration(seconds: 60),
+                  onTimeout: () => '读取图片超时（60 秒），请重试',
+                );
+                resultText = r;
+                card.output = resultText.length > 4000
+                    ? '${resultText.substring(0, 4000)}…'
+                    : resultText;
+                resultCode = resultText.startsWith('[图片已发送') ? 1 : -1;
               } else {
                 resultText =
                     await _execBuiltinTool(
