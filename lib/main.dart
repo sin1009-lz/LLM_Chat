@@ -2052,6 +2052,9 @@ class _HomePageState extends State<HomePage>
         setState(() {
           conv.messages.add(next);
           conv.updatedAt = DateTime.now();
+          // 步进收纳：新一轮开气泡 = 上一轮不再是最后一条消息，
+          // 立即收纳。epoch 让上一轮的缓存气泡失效刷新
+          _renderEpoch++;
         });
         current = next;
       }
@@ -4915,14 +4918,15 @@ class _HomePageState extends State<HomePage>
         _isResponding && !isUser && conv != null && conv.messages.last == m;
     // 组首展开态的「收起工具过程」回调（组首消息正文上方渲染）
     VoidCallback? _showToolCollapseBar;
-    // 工具轮折叠（按整段响应分组）：响应结束后，本段响应的全部中间
-    // 工具轮（轮内文字/思考/工具卡）合成为【一个】摘要胶囊——由组首
-    // 消息渲染，组内其余消息折叠态渲染为空；各轮发送的图片聚合到
-    // 胶囊下方保持可见。响应进行中保持展开（过程可见）；
-    // toolExpanded（挂在组首消息上，瞬态不持久化）为用户手动展开态，
-    // 重载后回到自动折叠。组内有被截断的轮次（中途停止）不自动折叠
+    // 工具轮折叠（按整段响应分组 · 步进收纳）：本轮不再是会话最后一
+    // 条消息时（新一轮气泡已开 / 已有最终回答）即收纳——每轮完成
+    // 即收，直到没有新一轮。整组收纳为一个无卡片文本行
+    // 「调用工具：…」（与背景融合），下方以细分割线与主输出分隔；
+    // 各轮发送的图片聚合在文本行下保持可见。toolExpanded（挂组首，
+    // 瞬态不持久化）为用户手动展开态
+    final isLastMsg = conv == null || conv.messages.last == m;
     if (!isUser &&
-        !_isResponding &&
+        !isLastMsg &&
         (m.toolCalls?.isNotEmpty ?? false) &&
         conv != null) {
       // 组首 = 同段响应（向上扫到用户消息为止）的第一个工具轮
@@ -4933,17 +4937,15 @@ class _HomePageState extends State<HomePage>
         g--;
       }
       final groupFirst = conv.messages[g];
-      // 向后聚合：工具名 + 图片 + 截断标记
+      // 向后聚合：工具名 + 图片
       final names = <String>[];
       final imgs = <ImagePart>[];
-      var anyTruncated = false;
       for (var k = g; k < conv.messages.length; k++) {
         final mk = conv.messages[k];
         if (mk.role == Role.user ||
             (mk.toolCalls?.isEmpty ?? true)) {
           break;
         }
-        // 截断轮也参与折叠（展开可见「已停止输出」标记）
         imgs.addAll(mk.imageParts ?? const <ImagePart>[]);
         names.addAll(
           (mk.toolCalls ?? const <ToolCallRecord>[])
@@ -4952,72 +4954,56 @@ class _HomePageState extends State<HomePage>
         );
       }
       if (!groupFirst.toolExpanded) {
-        if (g != index) return const SizedBox.shrink(); // 组内非首：折叠态为空
-        final shown = names.take(3).join('、');
-        final label = names.isEmpty
-            ? '工具调用（${(index - g) + 1} 轮）'
-            : '工具调用（${(index - g) + 1} 轮）· $shown'
-                  '${names.length > 3 ? ' 等 ${names.length} 个' : ''}';
+        if (g != index) return const SizedBox.shrink(); // 组内非首：收纳态为空
         final grey = Colors.grey.shade700;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // 收纳行：纯文本（无卡片底），点击展开整组
             InkWell(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(6),
               onTap: () => setState(() {
                 groupFirst.toolExpanded = true;
                 _renderEpoch++; // 组状态变化：全局失效（epoch 在签名内）
               }),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? const Color(0xFF262626)
-                      : const Color(0xFFF2F2F2),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: Colors.grey.withValues(alpha: 0.25),
-                  ),
-                ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
                 child: Row(
                   children: [
-                    Icon(Icons.hub_outlined, size: 13, color: grey),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.labelSmall?.copyWith(
-                          color: grey,
-                          fontWeight: FontWeight.w600,
-                        ),
+                    Text(
+                      '调用工具：${names.isEmpty ? '—' : names.join('、')}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: grey,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
-                    Icon(Icons.expand_more, size: 16, color: grey),
+                    const SizedBox(width: 4),
+                    Icon(Icons.expand_more, size: 15, color: grey),
                   ],
                 ),
               ),
             ),
-            // 各轮发送的图片不随折叠隐藏（聚合展示）
+            // 各轮发送的图片不随收纳隐藏（聚合展示）
             if (imgs.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(top: 2, bottom: 6),
                 child: SizedBox(
                   width: double.infinity,
                   child: _imageGrid(context, imgs),
                 ),
               ),
+            // 与主输出内容之间的分割线（细灰线，融于背景）
+            Container(
+              height: 0.5,
+              margin: const EdgeInsets.only(top: 6, bottom: 2),
+              color: Colors.grey.withValues(alpha: 0.25),
+            ),
           ],
         );
       } else if (g == index) {
-        // 组首 + 展开态：正文上方渲染「收起」条（展开/收起的显式入口）
+        // 组首 + 展开态：正文上方渲染「收起」行（无卡片）
         _showToolCollapseBar = () => setState(() {
           groupFirst.toolExpanded = false;
           _renderEpoch++;
@@ -5075,52 +5061,30 @@ class _HomePageState extends State<HomePage>
           child: Column(
             crossAxisAlignment: align,
             children: [
-              // 组首展开态的「收起工具过程」条（工具轮折叠的显式入口）
+              // 组首展开态的「收起」行（无卡片纯文本，与收纳行对称）
               if (_showToolCollapseBar != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: _showToolCollapseBar,
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).brightness == Brightness.dark
-                            ? const Color(0xFF262626)
-                            : const Color(0xFFF2F2F2),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: Colors.grey.withValues(alpha: 0.25),
+                InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: _showToolCollapseBar,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Row(
+                      children: [
+                        Text(
+                          '收起工具过程',
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(
+                                color: Colors.grey.shade700,
+                                fontWeight: FontWeight.w600,
+                              ),
                         ),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.hub_outlined,
-                            size: 13,
-                            color: Colors.grey.shade700,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '收起工具过程',
-                            style: Theme.of(context).textTheme.labelSmall
-                                ?.copyWith(
-                                  color: Colors.grey.shade700,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                          ),
-                          const Spacer(),
-                          Icon(
-                            Icons.expand_less,
-                            size: 16,
-                            color: Colors.grey.shade700,
-                          ),
-                        ],
-                      ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.expand_less,
+                          size: 15,
+                          color: Colors.grey.shade700,
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -6080,9 +6044,11 @@ class _HomePageState extends State<HomePage>
   /// 该消息是否为「已折叠的工具轮组内非首成员」——此类消息渲染为空，
   /// 外层边距也应归零（_MessageItem 调用；组首渲染摘要胶囊不算）
   bool isCollapsedToolMember(Message m) {
-    if (_isResponding || (m.toolCalls?.isEmpty ?? true)) return false;
+    if ((m.toolCalls?.isEmpty ?? true)) return false;
     final conv = _currentConversation;
     if (conv == null) return false;
+    // 步进收纳：最后一条消息（进行中的轮）不收纳
+    if (conv.messages.last == m) return false;
     final i = conv.messages.indexOf(m);
     if (i <= 0) return false;
     final prev = conv.messages[i - 1];
