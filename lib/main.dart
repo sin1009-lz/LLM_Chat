@@ -2180,6 +2180,9 @@ class _HomePageState extends State<HomePage>
         final pendingCalls = <int, ({String id, String name, String args})>{};
         // 本轮结束原因（'length' = 输出被截断）
         var roundFinish = '';
+        // 连接中断自动重连（最多 5 次）：清本轮半截输出后重发同请求
+        for (var retries = 0;; retries++) {
+        try {
         await for (final d in llm.chatWithTools(
           messages,
           model: model,
@@ -2222,6 +2225,32 @@ class _HomePageState extends State<HomePage>
             }
           }
         }
+        } catch (e) {
+          if (_isConnectionDrop(e) && retries < 5 && mounted && !_stopRequested) {
+            await Future<void>.delayed(
+              Duration(milliseconds: 500 + (retries + 1) * 400),
+            );
+            if (!mounted || _stopRequested) rethrow;
+            // 清本轮半截输出，重发同请求
+            _flushStreamBufferNow();
+            setState(() {
+              current
+                ..content = ''
+                ..thinking = null;
+              _renderEpoch++;
+            });
+            _streamBufContent = '';
+            _streamBufThinking = '';
+            acc.clear();
+            roundFinish = '';
+            pendingCalls.clear();
+            continue;
+          }
+          rethrow;
+        }
+        break; // 本轮流正常结束
+        } // for retries
+
         // 无工具调用 → 本轮即最终回答（当前气泡就是最终气泡）
         if (pendingCalls.isEmpty) {
           current.truncated = roundFinish == 'length';
@@ -2575,36 +2604,78 @@ class _HomePageState extends State<HomePage>
       return;
     }
     try {
-      _streamSub = llm
-          .chat(
-            [...conv.messages]..removeLast(),
-            model: model,
-            systemPrompt: finalPrompt.isEmpty ? null : finalPrompt,
-            thinkingDepth: _thinkingDepth,
-          )
-          .listen(
-            (delta) {
-              if (!mounted) return;
-              // 输出被截断标记（finish_reason = length）
-              if (delta.finishReason == 'length') _lastTruncated = true;
-              // 流式节流：delta 累积后 ~30fps 合并上屏
-              _streamAccumulate(assistantMsg, delta.thinking, delta.content);
-            },
-            onDone: () {
-              // 结束前 flush 残余 buffer（最后几个 token 不丢）
-              _flushStreamBufferNow();
-              assistantMsg.truncated = _lastTruncated;
-              _finishResponding(conv, assistantMsg);
-            },
-            onError: (e) {
-              _flushStreamBufferNow();
-              _onRespondError(conv, assistantMsg, e);
-            },
-            cancelOnError: true,
-          );
+      // 连接中断类错误自动重连（最多 5 次）：重试前清掉半截输出，
+      // 新流从头填充，避免内容重复
+      var retries = 0;
+      void start() {
+        _streamSub = llm
+            .chat(
+              [...conv.messages]..removeLast(),
+              model: model,
+              systemPrompt: finalPrompt.isEmpty ? null : finalPrompt,
+              thinkingDepth: _thinkingDepth,
+            )
+            .listen(
+              (delta) {
+                if (!mounted) return;
+                // 输出被截断标记（finish_reason = length）
+                if (delta.finishReason == 'length') _lastTruncated = true;
+                // 流式节流：delta 累积后 ~30fps 合并上屏
+                _streamAccumulate(assistantMsg, delta.thinking, delta.content);
+              },
+              onDone: () {
+                // 结束前 flush 残余 buffer（最后几个 token 不丢）
+                _flushStreamBufferNow();
+                assistantMsg.truncated = _lastTruncated;
+                _finishResponding(conv, assistantMsg);
+              },
+              onError: (e) async {
+                if (_isConnectionDrop(e) && retries < 5 && mounted) {
+                  retries++;
+                  await Future<void>.delayed(
+                    Duration(milliseconds: 500 + retries * 400),
+                  );
+                  if (!mounted || _stopRequested) {
+                    _onRespondError(conv, assistantMsg, e);
+                    return;
+                  }
+                  // 清半截输出与缓冲，重开流
+                  _flushStreamBufferNow();
+                  setState(() {
+                  assistantMsg
+                    ..content = ''
+                    ..thinking = null;
+                  _renderEpoch++;
+                  });
+                  _streamBufContent = '';
+                  _streamBufThinking = '';
+                  _lastTruncated = false;
+                  start();
+                  return;
+                }
+                _flushStreamBufferNow();
+                _onRespondError(conv, assistantMsg, e);
+              },
+              cancelOnError: true,
+            );
+      }
+
+      start();
     } catch (e) {
       _onRespondError(conv, assistantMsg, e);
     }
+  }
+
+  /// 连接中断类错误（可自动重连）：接收中断/连接重置/断管等。
+  /// HTTP 4xx/5xx（鉴权/额度/服务端拒绝）不在此列
+  bool _isConnectionDrop(Object e) {
+    final t = e.toString();
+    return e is http.ClientException ||
+        t.contains('Connection closed') ||
+        t.contains('Connection reset') ||
+        t.contains('Broken pipe') ||
+        t.contains('Software caused connection abort') ||
+        t.contains('Connection terminated');
   }
 
   /// ── 流式节流：token 级 delta 合并到 ~30fps 才 setState。
