@@ -5026,8 +5026,11 @@ class _HomePageState extends State<HomePage>
               // 仅在没有任何工具调用的轮次显示——工具调用轮只保留
               // 工具卡片分割块，不产生工具栏（避免一轮出现两个工具栏）；
               // 例外：输出被截断时强制显示（含思考阶段截断——
-              // 只有 thinking 没有正式内容也显示，截断后需可直接操作/继续）
-              if ((hasBubbleContent || m.truncated) &&
+              // 只有 thinking 没有正式内容也显示，截断后需可直接操作/继续）。
+              // 正在流式接收的消息不显示（此前模型先输出引导文字再调工具时，
+              // 文字期间工具栏可见、工具卡片挂上后又消失 = 闪一下）
+              if (!isStreamingTarget &&
+                  (hasBubbleContent || m.truncated) &&
                   (isUser ||
                       (m.toolCalls == null || m.toolCalls!.isEmpty) ||
                       m.truncated))
