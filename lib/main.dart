@@ -1153,6 +1153,7 @@ class _HomePageState extends State<HomePage>
   static const kBuiltinSearchTool = 'builtin__web_search';
   static const kBuiltinPythonTool = 'builtin__run_python';
   static const kBuiltinSendImageTool = 'builtin__send_image';
+  static const kBuiltinReadWebTool = 'builtin__read_webpage';
 
   /// 内置工具开关（当前对话生效值：会话级 ?? 全局）
   bool get _builtinToolsEffective {
@@ -1193,6 +1194,8 @@ class _HomePageState extends State<HomePage>
         if (_general.builtinTimeEnabled) _builtinToolDefs[0],
         if (_general.builtinLocationEnabled) _builtinToolDefs[1],
         if (_general.builtinSearchEnabled) _builtinToolDefs[2],
+        // 读网页：联网能力，与搜索同一开关
+        if (_general.builtinSearchEnabled) _builtinToolDefs[5],
         if (_general.builtinPythonEnabled) _builtinToolDefs[3],
         // 发图工具依赖 Python 内核产文件，同一开关
         if (_general.builtinPythonEnabled) _builtinToolDefs[4],
@@ -1320,6 +1323,24 @@ class _HomePageState extends State<HomePage>
             },
           },
           'required': ['path'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': kBuiltinReadWebTool,
+        'description':
+            '读取一个网页的正文内容（文章/文档/博客等）。返回提取后的'
+            '文本（优先正文，去除导航/脚本等噪音，上限约 2 万字符）。'
+            '当用户给出链接让你看、总结、翻译网页，或搜索结果需要打开'
+            '某个网页深入了解时调用。',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'url': {'type': 'string', 'description': '要读取的网页地址'},
+          },
+          'required': ['url'],
         },
       },
     },
@@ -1644,7 +1665,70 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  /// DeepSeek 原生联网搜索（Anthropic 兼容端点 + web_search_20250305
+  /// 网页正文读取上限（字符）
+  static const int _kMaxWebChars = 20000;
+
+  /// 读网页（builtin__read_webpage）：Jina Reader 优先（服务端渲染 +
+  /// 正文提取，返回干净的 Markdown——Cherry Studio 等客户端的默认方案），
+  /// 失败回退本地抓取 + HTML 正文提取（compute 隔离，隐私不外发）。
+  /// 返回给模型的文本；失败以 [读取失败 开头（调度侧据此判败）
+  Future<String> _readWebpage(String url) async {
+    var target = url.trim();
+    if (target.isEmpty) return '[读取失败：url 为空]';
+    if (!target.startsWith('http://') && !target.startsWith('https://')) {
+      target = 'https://$target';
+    }
+    const ua = {
+      'User-Agent':
+          'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,text/plain,*/*',
+    };
+    String cap(String t) => t.length > _kMaxWebChars
+        ? '${t.substring(0, _kMaxWebChars)}\n…[内容过长，已截断至 $_kMaxWebChars 字符]'
+        : t;
+    // 1) Jina Reader：前缀代理，无 key 免费额度（有速率限制）
+    try {
+      final res = await http
+          .get(Uri.parse('https://r.jina.ai/$target'), headers: ua)
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode == 200 && res.body.trim().isNotEmpty) {
+        return '网页内容（$target，经 Jina Reader 提取）：\n${cap(res.body.trim())}';
+      }
+    } catch (_) {}
+    // 2) 本地回退：直接抓取
+    try {
+      final res = await http
+          .get(Uri.parse(target), headers: ua)
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) {
+        return '[读取失败：HTTP ${res.statusCode}（$target）]';
+      }
+      if (res.bodyBytes.length > 3 << 20) {
+        return '[读取失败：内容超过 3MB]';
+      }
+      final ct = (res.headers['content-type'] ?? '').toLowerCase();
+      final raw = utf8.decode(res.bodyBytes, allowMalformed: true);
+      if (ct.contains('html') ||
+          RegExp(r'<html|<!doctype', caseSensitive: false).hasMatch(raw.substring(0, raw.length.clamp(0, 2000)))) {
+        final (title, body) = await compute(_extractWebHtml, raw);
+        if (body.trim().isEmpty) {
+          return '[读取失败：未提取到正文（可能是 JS 渲染页面，可稍后重试）]';
+        }
+        return '网页内容（$target，本地提取）：'
+            '\n标题：$title'
+            '\n${cap(body)}';
+      }
+      // 纯文本类（json/xml/plain）
+      return '网页内容（$target）：\n${cap(raw.trim())}';
+    } catch (e) {
+      return '[读取失败：$e]';
+    }
+  }
+
+  /// article/main/body，块级标签转换行，实体解码，空行压缩
+
+
+/// DeepSeek 原生联网搜索（Anthropic 兼容端点 + web_search_20250305
   /// 服务端工具，同 @deepseek-ai/dsh-web-search-deepseek 的做法）：
   /// 一次完整 Messages 调用，由 DeepSeek 服务器执行搜索，解析
   /// web_search_tool_result 结构化块，与 text 块 citations 摘录按 URL
@@ -1993,6 +2077,22 @@ class _HomePageState extends State<HomePage>
                 );
                 resultText = r;
                 resultCode = resultText.startsWith('[图片已发送') ? 1 : -1;
+              } else if (call.name == kBuiltinReadWebTool) {
+                // 读网页：Jina Reader 优先 + 本地提取回退；40s 网络超时
+                final r = await _readWebpage(
+                  (args['url'] as String?) ?? (args['query'] as String?) ?? '',
+                ).timeout(
+                  const Duration(seconds: 40),
+                  onTimeout: () => '[读取超时（40 秒），请稍后重试]',
+                );
+                resultText = r;
+                card.output = resultText.length > 4000
+                    ? '${resultText.substring(0, 4000)}…'
+                    : resultText;
+                resultCode = resultText.startsWith('[读取失败') ||
+                        resultText.startsWith('[读取超时')
+                    ? -1
+                    : resultText.length;
               } else {
                 resultText =
                     await _execBuiltinTool(
@@ -9255,6 +9355,85 @@ class _ImageFullscreenState extends State<_ImageFullscreen> {
     );
   }
 }
+
+(String, String) _extractWebHtml(String html) {
+  String entities(String x) => x
+      .replaceAllMapped(
+        RegExp(r'&#x([0-9A-Fa-f]+);'),
+        (m) => String.fromCharCode(int.parse(m.group(1)!, radix: 16)),
+      )
+      .replaceAllMapped(
+        RegExp(r'&#(\d+);'),
+        (m) => String.fromCharCode(int.parse(m.group(1)!)),
+      )
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&apos;', "'");
+  final title = entities(
+        RegExp(
+          r'<title[^>]*>([^<]*)</title>',
+          caseSensitive: false,
+        ).firstMatch(html)?.group(1) ?? '',
+      ).trim();
+  var h = html
+      .replaceAll(
+        RegExp(r'<script\b[^>]*>.*?</script>', dotAll: true, caseSensitive: false),
+        '',
+      )
+      .replaceAll(
+        RegExp(r'<style\b[^>]*>.*?</style>', dotAll: true, caseSensitive: false),
+        '',
+      )
+      .replaceAll(
+        RegExp(
+          r'<(noscript|svg|iframe|nav|header|footer|aside|form)\b[^>]*>.*?</\1>',
+          dotAll: true,
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .replaceAll(RegExp(r'<!--.*?-->', dotAll: true), '');
+  String? body = RegExp(
+    r'<article\b[^>]*>(.*?)</article>',
+    dotAll: true,
+    caseSensitive: false,
+  ).firstMatch(h)?.group(1);
+  body ??= RegExp(
+    r'<main\b[^>]*>(.*?)</main>',
+    dotAll: true,
+    caseSensitive: false,
+  ).firstMatch(h)?.group(1);
+  body ??= RegExp(
+    r'<body\b[^>]*>(.*?)</body>',
+    dotAll: true,
+    caseSensitive: false,
+  ).firstMatch(h)?.group(1) ?? h;
+  var t = body
+      .replaceAll(
+        RegExp(
+          r'</(p|div|li|tr|h[1-6]|blockquote|section|article|dd|dt)>',
+          caseSensitive: false,
+        ),
+        '\n',
+      )
+      .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+      .replaceAll(RegExp(r'<[^>]+>'), ' ');
+  t = entities(t).replaceAll('\u00a0', ' ');
+  final lines = t
+      .split('\n')
+      .map((l) => l.replaceAll(RegExp(r'[ \t]+'), ' ').trim())
+      .where((l) => l.isNotEmpty)
+      .join('\n');
+  return (title, lines);
+}
+
+/// 测试导出：HTML 正文提取（_extractWebHtml 为 isolate 顶层用途）
+(String, String) extractWebHtmlForTest(String html) =>
+    _extractWebHtml(html);
 
 /// 文本类附件扩展名：内容会随消息读取发送（模型可阅读全文）；
 /// 其余文件仅把文件名作为附件占位发送
