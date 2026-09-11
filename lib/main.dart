@@ -4971,16 +4971,14 @@ class _HomePageState extends State<HomePage>
                 child: Row(
                   children: [
                     Text(
-                      '调用工具：${names.isEmpty ? '—' : names.join('、')}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      '调用工具',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: grey,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                     const SizedBox(width: 4),
-                    Icon(Icons.expand_more, size: 15, color: grey),
+                    Icon(Icons.expand_more, size: 18, color: grey),
                   ],
                 ),
               ),
@@ -4994,11 +4992,12 @@ class _HomePageState extends State<HomePage>
                   child: _imageGrid(context, imgs),
                 ),
               ),
-            // 与主输出内容之间的分割线（细灰线，融于背景）
+            // 与主输出内容之间的分割线（短线，融于背景）
             Container(
+              width: 48,
               height: 0.5,
               margin: const EdgeInsets.only(top: 6, bottom: 2),
-              color: Colors.grey.withValues(alpha: 0.25),
+              color: Colors.grey.withValues(alpha: 0.3),
             ),
           ],
         );
@@ -5061,8 +5060,9 @@ class _HomePageState extends State<HomePage>
           child: Column(
             crossAxisAlignment: align,
             children: [
-              // 组首展开态的「收起」行（无卡片纯文本，与收纳行对称）
-              if (_showToolCollapseBar != null)
+              // 组首展开态的「收起」行（无卡片纯文本，与收纳行对称）+
+              // 同款短分割线（两个状态视觉一致）
+              if (_showToolCollapseBar != null) ...[
                 InkWell(
                   borderRadius: BorderRadius.circular(6),
                   onTap: _showToolCollapseBar,
@@ -5072,7 +5072,7 @@ class _HomePageState extends State<HomePage>
                       children: [
                         Text(
                           '收起工具过程',
-                          style: Theme.of(context).textTheme.labelSmall
+                          style: Theme.of(context).textTheme.bodyMedium
                               ?.copyWith(
                                 color: Colors.grey.shade700,
                                 fontWeight: FontWeight.w600,
@@ -5081,13 +5081,20 @@ class _HomePageState extends State<HomePage>
                         const SizedBox(width: 4),
                         Icon(
                           Icons.expand_less,
-                          size: 15,
+                          size: 18,
                           color: Colors.grey.shade700,
                         ),
                       ],
                     ),
                   ),
                 ),
+                Container(
+                  width: 48,
+                  height: 0.5,
+                  margin: const EdgeInsets.only(bottom: 6),
+                  color: Colors.grey.withValues(alpha: 0.3),
+                ),
+              ],
               // 思考过程区（仅 assistant 且有 thinking 时显示，折叠/展开）。
               // 思考深度关闭（0）时隐藏思考块——切换思考模式的实际可见效果；
               // 例外：输出被截断/停止时显示（未完成的过程需可见）
