@@ -766,8 +766,62 @@ class _HomePageState extends State<HomePage>
   final ChatScrollController _chatScroll = ChatScrollController();
 
   /// 滚动通知：跟踪用户手指拖动（当前无抢滚动逻辑，保留供调试）
+  /// 快速滚动滑轨（Telegram 式）：null = 隐藏；double = 当前滚动比例。
+  /// ValueNotifier 驱动——滑轨子树独立重建，滚动帧不碰 HomePage
+  final ValueNotifier<double?> _scrubState = ValueNotifier(null);
+
+  /// 手动拖动滑轨中（气泡强制显示）
+  bool _scrubbing = false;
+
+  /// 快速滚动检测：上一帧 pixels 与时间
+  double _lastScrubPixels = 0;
+  DateTime _lastScrubTs = DateTime.now();
+
+  /// 滑轨自动隐藏定时器
+  Timer? _scrubHideTimer;
+
   bool _onScrollNotification(ScrollNotification n) {
+    if (n.depth != 0) return false;
+    if (n is ScrollUpdateNotification) {
+      final now = DateTime.now();
+      final dt = now.difference(_lastScrubTs).inMicroseconds;
+      if (dt > 0) {
+        final speed =
+            (n.metrics.pixels - _lastScrubPixels).abs() / (dt / 1000);
+        // 快速滚动（>1.2 px/ms ≈ 疾速滑动/甩动）→ 显示滑轨+日期气泡
+        if ((speed > 1.2 || _scrubbing) &&
+            n.metrics.maxScrollExtent > 200) {
+          final f = (n.metrics.pixels / n.metrics.maxScrollExtent).clamp(
+            0.0,
+            1.0,
+          );
+          _scrubState.value = f;
+          _scrubHideTimer?.cancel();
+          if (!_scrubbing) {
+            _scrubHideTimer = Timer(const Duration(seconds: 2), () {
+              _scrubState.value = null;
+            });
+          }
+        }
+      }
+      _lastScrubPixels = n.metrics.pixels;
+      _lastScrubTs = now;
+    }
     return false;
+  }
+
+  /// 滑轨日期标签：按滚动比例估算当前可视位置的消息日期
+  String _scrubDateLabel(double fraction) {
+    final msgs = _currentConversation?.messages;
+    if (msgs == null || msgs.isEmpty) return '';
+    final i = (fraction * (msgs.length - 1)).round().clamp(
+      0,
+      msgs.length - 1,
+    );
+    final ts = msgs[i].ts;
+    final now = DateTime.now();
+    final y = ts.year == now.year ? '' : '${ts.year}/';
+    return '$y${ts.month}月${ts.day}日';
   }
 
   ChatStore? _store;
@@ -4680,6 +4734,8 @@ class _HomePageState extends State<HomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _streamTick.dispose();
+    _scrubHideTimer?.cancel();
+    _scrubState.dispose();
     _inputBarAnimatedTop.dispose();
     _tts?.stop();
     _streamSub?.cancel();
@@ -4927,6 +4983,8 @@ class _HomePageState extends State<HomePage>
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
           ),
         ),
+        // ── 快速滚动滑轨（Telegram 式：疾速滚动浮现，拖动看日期）──
+        Positioned.fill(child: _fastScrubber(context)),
         // ── Python 内核宿主：2×2 像素 WebView 负坐标移出视口 ──
         // WebView 必须挂树才会加载执行；零尺寸会挂起，故用最小尺寸 +
         // 移出可见区（不吃光栅资源，见启动 OOM 教训）
@@ -6479,6 +6537,103 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
+  /// 快速滚动滑轨（Telegram 式）：右侧浮动滑块 + 日期气泡。
+  /// 显示条件：疾速滚动（2s 无动作自动隐藏）或手动拖动中；
+  /// 拖动 = 实时跳转（jumpTo），气泡显示估算的消息日期
+  Widget _fastScrubber(BuildContext context) {
+    return ValueListenableBuilder<double?>(
+      valueListenable: _scrubState,
+      builder: (context, fraction, _) {
+        final visible = fraction != null;
+        return IgnorePointer(
+          ignoring: !visible,
+          child: AnimatedOpacity(
+            opacity: visible ? 1 : 0,
+            duration: const Duration(milliseconds: 180),
+            child: LayoutBuilder(
+              builder: (context, c) {
+                const trackTop = 150.0;
+                final trackBottom = c.maxHeight - 220;
+                final trackH = (trackBottom - trackTop).clamp(80.0, double.infinity);
+                final y = trackTop + (fraction ?? 0) * trackH;
+                return Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    // 拖动命中区（右缘 32px 全高）
+                    Positioned(
+                      right: 0,
+                      top: trackTop - 20,
+                      height: trackH + 40,
+                      width: 32,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onVerticalDragStart: (d) {
+                          _scrubbing = true;
+                          _onScrubDrag(
+                            d.localPosition.dy - 20,
+                            trackH,
+                          );
+                        },
+                        onVerticalDragUpdate: (d) =>
+                            _onScrubDrag(d.localPosition.dy - 20, trackH),
+                        onVerticalDragEnd: (_) => _scrubbing = false,
+                        onVerticalDragCancel: () => _scrubbing = false,
+                      ),
+                    ),
+                    // 滑块（胶囊）
+                    Positioned(
+                      right: 8,
+                      top: y - 28,
+                      child: Container(
+                        width: 4,
+                        height: 56,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.withValues(alpha: 0.55),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    // 日期气泡（滑块左侧）
+                    Positioned(
+                      right: 20,
+                      top: y - 14,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.65),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          _scrubDateLabel(fraction ?? 0),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// 滑轨拖动 → 实时跳转（y 为命中区内坐标，已扣除上沿余量）
+  void _onScrubDrag(double dy, double trackH) {
+    if (!_chatScroll.hasClients) return;
+    final f = (dy / trackH).clamp(0.0, 1.0);
+    _scrubState.value = f;
+    _chatScroll.jumpTo(f * _chatScroll.position.maxScrollExtent);
+  }
+
   /// 该消息是否为「已收纳轮次组的非首成员」（渲染为空 + 外边距归零；
   /// 卡片由组首渲染）
   bool isCollapsedToolMember(Message m) {
