@@ -25,6 +25,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:inspire_blur/inspire_blur.dart';
 import 'package:photo_view/photo_view.dart';
+import 'package:photo_view/photo_view_gallery.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:screen_corner_radius/screen_corner_radius.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -5870,14 +5871,11 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  /// 全屏查看图片：黑色背景 + 双指/双击缩放 + 点击关闭。
+  /// 全屏查看图片：黑色背景 + 双指/双击缩放 + 点击关闭，左右滑动
+  /// 浏览当前会话的全部图片。
   /// 用 MaterialPageRoute（全屏不透明，无 barrier 遮罩层，避免遮罩问题）
   void _showImageFullscreen(BuildContext context, ImagePart img) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _ImageFullscreen(image: _imageProviderFor(img.dataUrl)),
-      ),
-    );
+    _openImageGallery(img.dataUrl);
   }
 
   /// 缩略图 Future 实例缓存（防 FutureBuilder 重复 pending 闪烁）
@@ -5920,6 +5918,27 @@ class _HomePageState extends State<HomePage>
 
   /// 图片缓存字节量（约）：原始图 ≤4MB/张，10 张 ≈ 40MB 封顶
   static int _imageCacheBytes = 0;
+
+  /// 打开全屏图片画廊：收集当前会话全部图片（消息顺序），左右滑动
+  /// 浏览；[dataUrl] 定位初始页
+  void _openImageGallery(String dataUrl) {
+    final urls = <String>[];
+    for (final m in _currentConversation?.messages ?? const <Message>[]) {
+      for (final img in m.imageParts ?? const <ImagePart>[]) {
+        urls.add(img.dataUrl);
+      }
+    }
+    if (urls.isEmpty) return;
+    final idx = urls.indexOf(dataUrl);
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _ImageFullscreen(
+          images: urls.map(_imageProviderFor).toList(),
+          initialIndex: idx < 0 ? 0 : idx,
+        ),
+      ),
+    );
+  }
 
   /// 从 data URL 取（或创建并缓存）图片 provider。
   /// LRU 上限：10 张 / 约 40MB——超过时先访问序淘汰最旧条目
@@ -6148,7 +6167,9 @@ class _HomePageState extends State<HomePage>
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) =>
-                          _ImageFullscreen(image: _imageProviderFor(imgs[i])),
+                          _ImageFullscreen(
+                            images: [_imageProviderFor(imgs[i])],
+                          ),
                     ),
                   ),
                   child: ClipRRect(
@@ -9020,16 +9041,29 @@ class _GlassIconButtonState extends State<GlassIconButton>
 /// 放大后自由平移（不被图片边界锁死）+ 点按/右上角按钮关闭。
 /// 相比手写 InteractiveViewer：缩放动画顺滑、不瞬跳、不卡边界
 class _ImageFullscreen extends StatefulWidget {
-  const _ImageFullscreen({required this.image});
+  const _ImageFullscreen({required this.images, this.initialIndex = 0});
 
-  /// 复用聊天里的缓存 provider（原图全分辨率，不重复解码）
-  final ImageProvider image;
+  /// 当前聊天的全部图片（复用缓存 provider，原图全分辨率）；
+  /// 多张可左右滑动浏览
+  final List<ImageProvider> images;
+  final int initialIndex;
 
   @override
   State<_ImageFullscreen> createState() => _ImageFullscreenState();
 }
 
 class _ImageFullscreenState extends State<_ImageFullscreen> {
+  late final PageController _page = PageController(
+    initialPage: widget.initialIndex,
+  );
+  late int _index = widget.initialIndex;
+
+  @override
+  void dispose() {
+    _page.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -9037,29 +9071,58 @@ class _ImageFullscreenState extends State<_ImageFullscreen> {
       body: Stack(
         children: [
           Positioned.fill(
-            child: PhotoView(
-              imageProvider: widget.image,
-              backgroundDecoration: const BoxDecoration(color: Colors.black),
-              // 初始 contain（整图可见，无黑边）；放大上限 8 倍
-              initialScale: PhotoViewComputedScale.contained,
-              minScale: PhotoViewComputedScale.contained,
-              maxScale: 8.0,
-              basePosition: Alignment.center,
-              filterQuality: FilterQuality.medium,
-              // 点按关闭（双击缩放由 PhotoView 内置处理，不影响单击）
-              onTapUp: (_, _, _) => Navigator.of(context).pop(),
-              loadingBuilder: (context, event) => const Center(
-                child: CircularProgressIndicator(color: Colors.white70),
+            child: PhotoViewGallery.builder(
+              pageController: _page,
+              itemCount: widget.images.length,
+              onPageChanged: (i) => setState(() => _index = i),
+              builder: (context, i) => PhotoViewGalleryPageOptions(
+                imageProvider: widget.images[i],
+                // 初始 contain（整图可见，无黑边）；放大上限 8 倍
+                initialScale: PhotoViewComputedScale.contained,
+                minScale: PhotoViewComputedScale.contained,
+                maxScale: 8.0,
+                filterQuality: FilterQuality.medium,
+                // 点按关闭（双击缩放由 PhotoView 内置处理，不影响单击）
+                onTapUp: (_, _, _) => Navigator.of(context).pop(),
+                errorBuilder: (context, error, stackTrace) => const Center(
+                  child: Icon(
+                    Icons.broken_image_outlined,
+                    size: 64,
+                    color: Colors.white54,
+                  ),
+                ),
               ),
-              errorBuilder: (context, error, stackTrace) => const Center(
-                child: Icon(
-                  Icons.broken_image_outlined,
-                  size: 64,
-                  color: Colors.white54,
+              backgroundDecoration: const BoxDecoration(color: Colors.black),
+            ),
+          ),
+          // 页码指示（多张时）
+          if (widget.images.length > 1)
+            Positioned(
+              bottom: MediaQuery.paddingOf(context).bottom + 20,
+              left: 0,
+              right: 0,
+              child: IgnorePointer(
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.black45,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${_index + 1} / ${widget.images.length}',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
           // 右上角关闭按钮（状态栏下方）
           Positioned(
             top: MediaQuery.paddingOf(context).top + 8,
