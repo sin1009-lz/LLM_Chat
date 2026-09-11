@@ -1843,6 +1843,8 @@ class _HomePageState extends State<HomePage>
         setState(() {
           conv.messages.remove(current);
           _isResponding = false;
+      _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
+        _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
         });
         _persist(conv);
       } else {
@@ -3046,6 +3048,8 @@ class _HomePageState extends State<HomePage>
       setState(() {
         conv.messages.remove(assistantMsg);
         _isResponding = false;
+      _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
+        _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
         conv.updatedAt = DateTime.now();
       });
       await _persist(conv);
@@ -3054,6 +3058,7 @@ class _HomePageState extends State<HomePage>
     _stopStreamService();
     setState(() {
       _isResponding = false;
+      _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
       conv.updatedAt = DateTime.now();
     });
     // 无需滚动：贴底用户 offset 0 天然保持（底部向上生长），
@@ -3123,6 +3128,7 @@ class _HomePageState extends State<HomePage>
     if (!mounted) return;
     setState(() {
       _isResponding = false;
+      _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
       assistantMsg
         ..content = '请求失败：$e'
         ..error = true;
@@ -3158,7 +3164,10 @@ class _HomePageState extends State<HomePage>
     }
     final conv = _currentConversation;
     if (conv == null || conv.messages.isEmpty) {
-      setState(() => _isResponding = false);
+      setState(() {
+        _isResponding = false;
+        _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding
+      });
       return;
     }
     final last = conv.messages.last;
@@ -3172,6 +3181,8 @@ class _HomePageState extends State<HomePage>
       setState(() {
         conv.messages.removeLast();
         _isResponding = false;
+      _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
+        _renderEpoch++; // 响应结束：工具轮折叠态依赖 _isResponding（不在签名内，需全局失效）
       });
       _persist(conv);
     } else {
@@ -4902,74 +4913,108 @@ class _HomePageState extends State<HomePage>
     final conv = _currentConversation;
     final isStreamingTarget =
         _isResponding && !isUser && conv != null && conv.messages.last == m;
-    // 工具轮折叠：响应结束后，中间工具轮（含轮内文字/思考/工具卡）
-    // 自动收起为一行摘要胶囊；发送的图片保留可见；点击展开。
-    // 响应进行中保持展开（过程可见）；toolExpanded 为用户手动展开态
-    //（瞬态，重载后回到自动折叠）
+    // 工具轮折叠（按整段响应分组）：响应结束后，本段响应的全部中间
+    // 工具轮（轮内文字/思考/工具卡）合成为【一个】摘要胶囊——由组首
+    // 消息渲染，组内其余消息折叠态渲染为空；各轮发送的图片聚合到
+    // 胶囊下方保持可见。响应进行中保持展开（过程可见）；
+    // toolExpanded（挂在组首消息上，瞬态不持久化）为用户手动展开态，
+    // 重载后回到自动折叠。组内有被截断的轮次（中途停止）不自动折叠
     if (!isUser &&
         !_isResponding &&
         (m.toolCalls?.isNotEmpty ?? false) &&
-        !m.toolExpanded) {
-      final all = m.toolCalls!;
-      final visible = all.where((t) => !t.silent).toList();
-      final names = visible
-          .map((t) => t.name)
-          .take(3)
-          .join('、');
-      final label = visible.isEmpty
-          ? '工具调用轮'
-          : '工具调用轮 · $names${visible.length > 3 ? ' 等 ${visible.length} 个' : ''}';
-      final grey = Colors.grey.shade700;
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () => setState(() {
-              m.toolExpanded = true;
-              _renderEpoch++; // 签名失效（epoch 在签名内）
-            }),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: Theme.of(context).brightness == Brightness.dark
-                    ? const Color(0xFF262626)
-                    : const Color(0xFFF2F2F2),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.hub_outlined, size: 13, color: grey),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: grey,
-                        fontWeight: FontWeight.w600,
+        conv != null) {
+      // 组首 = 同段响应（向上扫到用户消息为止）的第一个工具轮
+      var g = index;
+      while (g > 0 &&
+          conv.messages[g - 1].role != Role.user &&
+          (conv.messages[g - 1].toolCalls?.isNotEmpty ?? false)) {
+        g--;
+      }
+      final groupFirst = conv.messages[g];
+      // 向后聚合：工具名 + 图片 + 截断标记
+      final names = <String>[];
+      final imgs = <ImagePart>[];
+      var anyTruncated = false;
+      for (var k = g; k < conv.messages.length; k++) {
+        final mk = conv.messages[k];
+        if (mk.role == Role.user ||
+            (mk.toolCalls?.isEmpty ?? true)) {
+          break;
+        }
+        anyTruncated |= mk.truncated;
+        imgs.addAll(mk.imageParts ?? const <ImagePart>[]);
+        names.addAll(
+          (mk.toolCalls ?? const <ToolCallRecord>[])
+              .where((t) => !t.silent)
+              .map((t) => t.name),
+        );
+      }
+      if (!groupFirst.toolExpanded && !anyTruncated) {
+        if (g != index) return const SizedBox.shrink(); // 组内非首：折叠态为空
+        final shown = names.take(3).join('、');
+        final label = names.isEmpty
+            ? '工具调用（${(index - g) + 1} 轮）'
+            : '工具调用（${(index - g) + 1} 轮）· $shown'
+                  '${names.length > 3 ? ' 等 ${names.length} 个' : ''}';
+        final grey = Colors.grey.shade700;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => setState(() {
+                groupFirst.toolExpanded = true;
+                _renderEpoch++; // 组状态变化：全局失效（epoch 在签名内）
+              }),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? const Color(0xFF262626)
+                      : const Color(0xFFF2F2F2),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: Colors.grey.withValues(alpha: 0.25),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.hub_outlined, size: 13, color: grey),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelSmall?.copyWith(
+                          color: grey,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
-                  ),
-                  Icon(Icons.expand_more, size: 16, color: grey),
-                ],
+                    Icon(Icons.expand_more, size: 16, color: grey),
+                  ],
+                ),
               ),
             ),
-          ),
-          // 发送的图片不随折叠隐藏（用户要看的内容）
-          if (m.imageParts?.isNotEmpty ?? false)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: SizedBox(
-                width: double.infinity,
-                child: _imageGrid(context, m.imageParts!),
+            // 各轮发送的图片不随折叠隐藏（聚合展示）
+            if (imgs.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: _imageGrid(context, imgs),
+                ),
               ),
-            ),
-        ],
-      );
+          ],
+        );
+      }
     }
     // 分支导航数据源：本消息自己的分支优先；工具轮次的分支挂在轮首
     // 工具轮气泡上，而工具轮不显示工具栏，所以在同轮次内向前找最近的
@@ -6005,10 +6050,22 @@ class _HomePageState extends State<HomePage>
               borderRadius: BorderRadius.circular(8),
               onTap: _isResponding
                   ? null
-                  : () => setState(() {
-                      m.toolExpanded = false;
-                      _renderEpoch++;
-                    }),
+                  : () {
+                      // 收起整组：组状态挂在组首消息上
+                      final c = _currentConversation;
+                      if (c == null) return;
+                      final i = c.messages.indexOf(m);
+                      var g = i;
+                      while (g > 0 &&
+                          c.messages[g - 1].role != Role.user &&
+                          (c.messages[g - 1].toolCalls?.isNotEmpty ?? false)) {
+                        g--;
+                      }
+                      setState(() {
+                        c.messages[g].toolExpanded = false;
+                        _renderEpoch++;
+                      });
+                    },
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Row(
