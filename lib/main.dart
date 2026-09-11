@@ -847,6 +847,8 @@ class _HomePageState extends State<HomePage>
     // File: 名称/Content，模型可阅读）；其他文件 → 名字拼进文本
     final imageParts = <ImagePart>[];
     final fileParts = <MessageFilePart>[];
+    // 图片编码任务（循环收集，循环后一次 isolate 批量编码）
+    final imgJobs = <Object?>[];
     final nameParts = <String>[];
     for (final att in _attachments) {
       if (att.loading) continue; // 压缩占位不进消息
@@ -937,13 +939,14 @@ class _HomePageState extends State<HomePage>
         // 双档压缩全部走原生（C 实现，快且稳——此前 compute 里的纯
         // Dart 解码对部分图抛异常 → catch 降级成文本附件
         // 「[附件: img_xxx.jpg]」，即图片变文本的根源）：
-        // AI 档 = 1568px/80；前端档 = 320px/60
+        // AI 档 = 1568px/80；前端档 = 320px/60。
+        // base64 编码统一收集到循环外一次 compute 批量做（多图 MB 级
+        // 编码不占主线程）
         final aiBytes = await compressSingleImageNative(
           bytes,
           maxSide: _imgMaxSide,
           quality: _imgQuality,
         );
-        final aiUrl = 'data:image/jpeg;base64,${base64Encode(aiBytes)}';
         // 前端小图：从 AI 档再缩（原生，快）
         Uint8List thumbBytes;
         try {
@@ -957,32 +960,61 @@ class _HomePageState extends State<HomePage>
         } catch (_) {
           thumbBytes = aiBytes;
         }
-        final thumbUrl = 'data:image/jpeg;base64,${base64Encode(thumbBytes)}';
-        imageParts.add(
-          ImagePart(
-            name: att.name,
-            mimeType: 'image/jpeg',
-            dataUrl: aiUrl,
-            thumbUrl: thumbUrl,
-          ),
-        );
+        imgJobs.add(att.name);
+        imgJobs.add(aiBytes);
+        imgJobs.add(thumbBytes);
       } catch (_) {
         // 兜底：原生压缩失败也不降级为文本——原图直传（保图片语义）
         try {
           final bytes = await att.readBytes();
           if (bytes.isNotEmpty) {
             final mime = _mimeFromName(att.name);
-            imageParts.add(
-              ImagePart(
-                name: att.name,
-                mimeType: mime,
-                dataUrl: 'data:$mime;base64,${base64Encode(bytes)}',
-              ),
-            );
+            imgJobs.add(att.name);
+            imgJobs.add(bytes);
+            imgJobs.add(null);
+            imgJobs.add(mime);
             continue;
           }
         } catch (_) {}
         nameParts.add(att.name);
+      }
+    }
+    // 批量 base64（isolate）：AI 档 + 前端缩略
+    if (imgJobs.isNotEmpty) {
+      final jobs = <(String, Uint8List)>[];
+      final names = <String>[];
+      final mimes = <String>[];
+      var i = 0;
+      while (i < imgJobs.length) {
+        final name = imgJobs[i] as String;
+        final ai = imgJobs[i + 1] as Uint8List;
+        final thumb = imgJobs[i + 2] as Uint8List?;
+        final mime = (i + 3 < imgJobs.length && imgJobs[i + 3] is String)
+            ? imgJobs[i + 3] as String
+            : 'image/jpeg';
+        if (thumb != null) {
+          names.add(name);
+          mimes.add(mime);
+          jobs.add((mime, ai));
+          jobs.add((mime, thumb));
+        } else {
+          names.add(name);
+          mimes.add(mime);
+          jobs.add((mime, ai));
+          jobs.add((mime, ai)); // 无缩略：显示兜底用 AI 档
+        }
+        i += thumb != null ? 3 : 4;
+      }
+      final urls = await compute(_bytesToDataUrls, jobs);
+      for (var k = 0; k < names.length; k++) {
+        imageParts.add(
+          ImagePart(
+            name: names[k],
+            mimeType: mimes[k],
+            dataUrl: urls[k * 2],
+            thumbUrl: urls[k * 2 + 1],
+          ),
+        );
       }
     }
     final fullText = nameParts.isEmpty
@@ -1071,7 +1103,8 @@ class _HomePageState extends State<HomePage>
     if (p == null || p.isEmpty) return const [];
     final doc = await PdfDocument.openFile(p);
     try {
-      final parts = <ImagePart>[];
+      final names = <String>[];
+      final pngs = <Uint8List>[];
       final count = math.min(doc.pages.length, 10);
       for (var i = 0; i < count; i++) {
         // 渲染宽 1024（高度按页面比例自动）
@@ -1081,20 +1114,27 @@ class _HomePageState extends State<HomePage>
           final raster = await img.createImage();
           final data = await raster.toByteData(format: ui.ImageByteFormat.png);
           if (data != null) {
-            parts.add(
-              ImagePart(
-                name: '${att.name} 第${i + 1}页',
-                mimeType: 'image/png',
-                dataUrl:
-                    'data:image/png;base64,${base64Encode(data.buffer.asUint8List())}',
-              ),
-            );
+            names.add('${att.name} 第${i + 1}页');
+            pngs.add(data.buffer.asUint8List());
           }
         } finally {
           img.dispose();
         }
       }
-      return parts;
+      // 整页 PNG（1-2MB/页 ×10）base64 编码放 isolate
+      if (pngs.isEmpty) return const <ImagePart>[];
+      final urls = await compute(
+        _bytesToDataUrls,
+        [for (final b in pngs) ('image/png', b)],
+      );
+      return [
+        for (var i = 0; i < names.length; i++)
+          ImagePart(
+            name: names[i],
+            mimeType: 'image/png',
+            dataUrl: urls[i],
+          ),
+      ];
     } finally {
       doc.dispose();
     }
@@ -1704,9 +1744,10 @@ class _HomePageState extends State<HomePage>
         return '[发送失败：文件不存在（$p）。请先用 run_python 保存图片，'
             '例如 plt.savefig("$p", dpi=110)]';
       }
-      final bytes = base64Decode(b64);
-      if (bytes.isEmpty) return '[发送失败：文件为空]';
-      if (bytes.length > 8 << 20) return '[发送失败：图片超过 8MB，请压缩后重试]';
+      // 大小用 base64 长度估算（×3/4）——主线程解码 8MB 是卡顿源
+      final estBytes = b64.length * 3 ~/ 4;
+      if (estBytes > 8 << 20) return '[发送失败：图片超过 8MB，请压缩后重试]';
+      if (estBytes == 0) return '[发送失败：文件为空]';
       final mime = _mimeFromName(p);
       final name = p.split('/').last;
       _pendingToolImages.add(
@@ -1716,7 +1757,7 @@ class _HomePageState extends State<HomePage>
           dataUrl: 'data:$mime;base64,$b64',
         ),
       );
-      final kb = (bytes.length / 1024).round();
+      final kb = (estBytes / 1024).round();
       return '[图片已发送给用户：$name（$kb KB）'
           '${caption.isEmpty ? '' : '，说明：$caption'}]';
     } catch (e) {
@@ -1825,13 +1866,16 @@ class _HomePageState extends State<HomePage>
               ct.startsWith('image/') &&
               res.bodyBytes.isNotEmpty &&
               res.bodyBytes.length <= 2 << 20) {
-            return 'data:$ct;base64,${base64Encode(res.bodyBytes)}';
+            return (ct, res.bodyBytes);
           }
         } catch (_) {}
         return null;
       }),
     );
-    return out.whereType<String>().toList();
+    final jobs = out.whereType<(String, Uint8List)>().toList();
+    if (jobs.isEmpty) return const <String>[];
+    // base64 编码放 isolate（6×2MB 编码不占主线程）
+    return compute(_bytesToDataUrls, jobs);
   }
 
   /// view_image：取图片（http(s) URL 下载，或 Pyodide 文件）→ dataUrl
@@ -6483,15 +6527,14 @@ class _HomePageState extends State<HomePage>
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
   /// 该消息是否为「已收纳轮次组的非首成员」（渲染为空 + 外边距归零；
-  /// 卡片由组首渲染）
-  bool isCollapsedToolMember(Message m) {
+  /// 卡片由组首渲染）。[index] 由调用方传入（消息项自带），免 O(n) 扫描
+  bool isCollapsedToolMember(Message m, int index) {
     if ((m.toolCalls?.isEmpty ?? true)) return false;
     final conv = _currentConversation;
     if (conv == null) return false;
     if (conv.messages.last == m) return false; // 进行中的轮
-    final i = conv.messages.indexOf(m);
-    if (i <= 0) return false;
-    final prev = conv.messages[i - 1];
+    if (index <= 0) return false;
+    final prev = conv.messages[index - 1];
     if (prev.role == Role.user || (prev.toolCalls?.isEmpty ?? true)) {
       return false; // 组首（渲染卡片）
     }
@@ -9281,7 +9324,7 @@ class _MessageItemState extends State<_MessageItem> {
   Widget build(BuildContext context) {
     final home = _HomePageScope.of(context);
     // 已收纳轮次的组内非首成员：外边距归零（渲染为空，不留空带）
-    final hidden = home.isCollapsedToolMember(widget.message);
+    final hidden = home.isCollapsedToolMember(widget.message, widget.index);
     return _cached ??= Padding(
       padding: hidden ? EdgeInsets.zero : const EdgeInsets.only(bottom: 12),
       child: home.buildMessageBubble(context, widget.message, widget.index),
@@ -10033,6 +10076,12 @@ class _ImageFullscreenState extends State<_ImageFullscreen> {
       .join('\n');
   return (title, lines);
 }
+
+/// 批量 bytes → data URL（isolate 内 base64 编码）：多张大图/
+/// PDF 整页 PNG 在主线程编码 MB 级数据是发送卡顿源
+List<String> _bytesToDataUrls(List<(String, Uint8List)> jobs) => [
+  for (final (mime, b) in jobs) 'data:$mime;base64,${base64Encode(b)}',
+];
 
 /// 测试导出：HTML 正文提取（_extractWebHtml 为 isolate 顶层用途）
 (String, String) extractWebHtmlForTest(String html) =>

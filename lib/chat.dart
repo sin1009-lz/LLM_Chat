@@ -977,7 +977,8 @@ class ChatStore {
     // JSON 编码放后台 isolate：分支树大会话的序列化不在 UI 线程执行
     //（分支切换卡顿来源）
     final json = await compute(_encodeConversationJson, c);
-    _file(c.id).writeAsStringSync(json);
+    // 异步写盘：MB 级 JSON 同步写会阻塞 UI 线程（保存/归档卡顿源）
+    await _file(c.id).writeAsString(json);
     // 更新索引（保持顺序：已存在原位更新，新的插最前）
     final index = _readIndex();
     final entry = _indexEntryOf(c);
@@ -996,7 +997,7 @@ class ChatStore {
     if (c == null) return;
     c.title = title;
     final json = await compute(_encodeConversationJson, c);
-    _file(id).writeAsStringSync(json);
+    await _file(id).writeAsString(json);
     final index = _readIndex();
     final i = index.indexWhere((e) => e['id'] == id);
     if (i >= 0) {
