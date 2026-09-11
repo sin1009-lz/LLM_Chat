@@ -4978,7 +4978,16 @@ class _HomePageState extends State<HomePage>
                       ),
                     ),
                     const SizedBox(width: 4),
-                    Icon(Icons.expand_more, size: 18, color: grey),
+                    // 挂载补间旋转 0→180°（收起方向）；与展开行的 180→0°
+                    // 成对，切换观感为同一箭头连续转动
+                    TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0.0, end: 0.5),
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOutCubic,
+                      builder: (_, t, child) =>
+                          Transform.rotate(angle: t * math.pi, child: child),
+                      child: Icon(Icons.expand_more, size: 18, color: grey),
+                    ),
                   ],
                 ),
               ),
@@ -4992,9 +5001,9 @@ class _HomePageState extends State<HomePage>
                   child: _imageGrid(context, imgs),
                 ),
               ),
-            // 与主输出内容之间的分割线（短线，融于背景）
+            // 与主输出内容之间的分割线（比文字长一点）
             Container(
-              width: 48,
+              width: 88,
               height: 0.5,
               margin: const EdgeInsets.only(top: 6, bottom: 2),
               color: Colors.grey.withValues(alpha: 0.3),
@@ -5067,11 +5076,11 @@ class _HomePageState extends State<HomePage>
                   borderRadius: BorderRadius.circular(6),
                   onTap: _showToolCollapseBar,
                   child: Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
+                    padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Row(
                       children: [
                         Text(
-                          '收起工具过程',
+                          '调用工具',
                           style: Theme.of(context).textTheme.bodyMedium
                               ?.copyWith(
                                 color: Colors.grey.shade700,
@@ -5079,17 +5088,25 @@ class _HomePageState extends State<HomePage>
                               ),
                         ),
                         const SizedBox(width: 4),
-                        Icon(
-                          Icons.expand_less,
-                          size: 18,
-                          color: Colors.grey.shade700,
+                        // 180→0° 旋转（展开方向），与收纳行成对
+                        TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0.5, end: 0.0),
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeOutCubic,
+                          builder: (_, t, child) =>
+                              Transform.rotate(angle: t * math.pi, child: child),
+                          child: Icon(
+                            Icons.expand_more,
+                            size: 18,
+                            color: Colors.grey.shade700,
+                          ),
                         ),
                       ],
                     ),
                   ),
                 ),
                 Container(
-                  width: 48,
+                  width: 88,
                   height: 0.5,
                   margin: const EdgeInsets.only(bottom: 6),
                   color: Colors.grey.withValues(alpha: 0.3),
