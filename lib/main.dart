@@ -9,8 +9,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:cupertino_liquid_glass/cupertino_liquid_glass.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart'
-    show ValueListenable, compute, kIsWeb;
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderProxyBox;
 import 'package:flutter/services.dart';
@@ -6375,94 +6374,72 @@ class _HomePageState extends State<HomePage>
     // 调用完成后收起到一槽厚；运行中/手动展开为完整卡
     final collapsed = !running && !m.toolCardExpanded;
     final labelSmall = Theme.of(context).textTheme.labelSmall;
+    // 两态共用同一头部行构建（像素级一致，开合不跳动）：
+    // 左标签文本不同，其余（图标/间距/右对齐完成数/箭头）完全相同
+    Widget header(String left, VoidCallback? onTap) => InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          children: [
+            Icon(Icons.hub_outlined, size: 13, color: grey),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                left,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: labelSmall?.copyWith(
+                  color: grey,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (running) ...[
+              const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(strokeWidth: 1.6),
+              ),
+              const SizedBox(width: 4),
+            ],
+            Text(
+              running ? '调用中…' : '完成 ${tcs.length} 个工具',
+              style: labelSmall?.copyWith(color: running ? grey : success),
+            ),
+            const SizedBox(width: 2),
+            Icon(
+              collapsed ? Icons.expand_more : Icons.expand_less,
+              size: 16,
+              color: grey,
+            ),
+          ],
+        ),
+      ),
+    );
     final Widget content;
     if (collapsed) {
-      content = InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: () => setState(() {
+      content = header(
+        '工具调用：${tcs.first.name}',
+        () => setState(() {
           m.toolCardExpanded = true;
           _renderEpoch++;
         }),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Row(
-            children: [
-              Icon(Icons.hub_outlined, size: 13, color: grey),
-              const SizedBox(width: 4),
-              // 名称灰色靠左（超长省略），完成数蓝色右对齐（同展开态布局）
-              Expanded(
-                child: Text(
-                  '工具调用：${tcs.first.name}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: labelSmall?.copyWith(
-                    color: grey,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const Spacer(),
-              Text(
-                '完成 ${tcs.length} 个工具',
-                style: labelSmall?.copyWith(color: success),
-              ),
-              const SizedBox(width: 2),
-              Icon(Icons.expand_more, size: 16, color: grey),
-            ],
-          ),
-        ),
       );
     } else {
       content = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 标签行（完成后可点击收起）
-          InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: running
+          header(
+            '工具调用',
+            running
                 ? null
                 : () => setState(() {
                     m.toolCardExpanded = false;
                     _renderEpoch++;
                   }),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 2),
-              child: Row(
-                children: [
-                  Icon(Icons.hub_outlined, size: 13, color: grey),
-                  const SizedBox(width: 4),
-                  Text(
-                    '工具调用',
-                    style: labelSmall?.copyWith(
-                      color: grey,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const Spacer(),
-                  if (running)
-                    const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(strokeWidth: 1.6),
-                        ),
-                        SizedBox(width: 4),
-                      ],
-                    ),
-                  Text(
-                    running ? '调用中…' : '完成 ${tcs.length} 个工具',
-                    style: labelSmall?.copyWith(
-                      color: running ? grey : success,
-                    ),
-                  ),
-                  if (!running)
-                    Icon(Icons.expand_less, size: 16, color: grey),
-                ],
-              ),
-            ),
           ),
           const SizedBox(height: 4),
           // 全量展开（高度限制 360，工具很多时内部滚动）
