@@ -547,6 +547,10 @@ class Message {
   /// 仅视图态，不持久化
   bool toolCardExpanded = false;
 
+  /// 轮次收纳卡展开态：整卡默认收起为一槽厚（点击展开全部轮次）。
+  /// 仅视图态，不持久化
+  bool roundsExpanded = false;
+
   /// 图片部件（多模态；仅用户消息，原图 base64 持久化）
   List<ImagePart>? imageParts;
 

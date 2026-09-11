@@ -6602,10 +6602,47 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  /// 轮次收纳卡：本段响应的全部已完成轮次（含思考）收录为一张卡，
-  /// 轮与轮之间以横线分割；由组首消息渲染，组内其余消息渲染为空
+  /// 轮次收纳卡：本段响应的全部已完成轮次（含思考）收录为一张卡。
+  /// 整卡默认收起为一槽厚（头部行：轮数 + 完成工具数），点击展开；
+  /// 卡内条目（思考/正文/工具）以横线分割，思考为扁平形态（无嵌卡）。
+  /// 由组首消息渲染，组内其余消息渲染为空
   Widget _roundsCollectedCard(BuildContext context, List<Message> rounds) {
     final dark = Theme.of(context).brightness == Brightness.dark;
+    final grey = Colors.grey.shade700;
+    final success = dark ? kSuccessColor : kSuccessColorLight;
+    final labelSmall = Theme.of(context).textTheme.labelSmall;
+    final total = rounds
+        .map(
+          (m) => (m.toolCalls ?? const <ToolCallRecord>[])
+              .where((t) => !t.silent)
+              .length,
+        )
+        .fold<int>(0, (a, b) => a + b);
+    final first = rounds.first;
+    final Widget header = Row(
+      children: [
+        Icon(Icons.hub_outlined, size: 13, color: grey),
+        const SizedBox(width: 4),
+        Expanded(
+          child: Text(
+            '工具调用（${rounds.length} 轮）',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: labelSmall?.copyWith(
+              color: grey,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Text('完成 $total 个工具', style: labelSmall?.copyWith(color: success)),
+        const SizedBox(width: 2),
+        Icon(
+          first.roundsExpanded ? Icons.expand_less : Icons.expand_more,
+          size: 16,
+          color: grey,
+        ),
+      ],
+    );
     final children = <Widget>[];
     for (var i = 0; i < rounds.length; i++) {
       final m = rounds[i];
@@ -6624,17 +6661,25 @@ class _HomePageState extends State<HomePage>
           .toList();
       final hasText = m.content.trim().isNotEmpty;
       final hasThinking = m.displayThinking?.trim().isNotEmpty ?? false;
-      // 思考块（自带折叠交互，入卡收纳）
+      // 思考：扁平形态（无嵌卡），自带折叠交互
       if (hasThinking)
         children.add(
           _thinkingBlock(
             context,
             _displayCached(m.displayThinking!),
             streaming: false,
+            flat: true,
           ),
         );
+      // 思考与其余条目之间的横线
       if (hasThinking && (hasText || tcs.isNotEmpty))
-        children.add(const SizedBox(height: 6));
+        children.add(
+          Container(
+            height: 0.5,
+            margin: const EdgeInsets.symmetric(vertical: 8),
+            color: Colors.grey.withValues(alpha: 0.3),
+          ),
+        );
       // 本轮正文（无壳直接渲染，与卡同底）
       if (hasText)
         children.add(
@@ -6687,10 +6732,29 @@ class _HomePageState extends State<HomePage>
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: children,
+      // 整卡默认收起（一槽厚）↔ 展开全量；开合动画
+      child: AnimatedSize(
+        alignment: Alignment.topLeft,
+        duration: const Duration(milliseconds: 220),
+        reverseDuration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => setState(() {
+            first.roundsExpanded = !first.roundsExpanded;
+            _renderEpoch++;
+          }),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: first.roundsExpanded
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [header, const SizedBox(height: 6), ...children],
+                  )
+                : header,
+          ),
+        ),
       ),
     );
   }
@@ -6857,8 +6921,17 @@ class _HomePageState extends State<HomePage>
   /// 展开时思考区增高：上翻补偿/贴底保持由 ChatScrollPosition 在
   /// 布局阶段统一处理（correctForNewDimensions），无需额外干预。
   /// [streaming] 流式接收中：尾部窗口 + Text（见 _ThinkingBlock 注释）
-  Widget _thinkingBlock(BuildContext context, String thinking, {bool streaming = false}) {
-    return _ThinkingBlock(thinking: thinking, streaming: streaming);
+  Widget _thinkingBlock(
+    BuildContext context,
+    String thinking, {
+    bool streaming = false,
+    bool flat = false,
+  }) {
+    return _ThinkingBlock(
+      thinking: thinking,
+      streaming: streaming,
+      flat: flat,
+    );
   }
 
   /// 流式等待占位（三个点）
@@ -8749,9 +8822,17 @@ class _TypingDotsPainter extends CustomPainter {
 
 /// 思考过程折叠块（llama.cpp 风格：灰色小字 + 展开/收起箭头）
 class _ThinkingBlock extends StatefulWidget {
-  const _ThinkingBlock({required this.thinking, this.streaming = false});
+  const _ThinkingBlock({
+    required this.thinking,
+    this.streaming = false,
+    this.flat = false,
+  });
 
   final String thinking;
+
+  /// 扁平形态（轮次收纳卡内用）：无灰底小卡外壳，直接分段内容——
+  /// 与卡内其他条目一样以横线分割，不嵌卡中卡
+  final bool flat;
 
   /// 流式接收中：尾部固定窗口 + 普通 Text——SelectableText 对大文本
   /// 是 O(n) 全量重排（含选择区域构建），每 33ms 一帧时是卡顿主因；
@@ -8859,22 +8940,14 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
       color: Colors.grey.shade700,
       height: 1.5,
     );
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Material(
-        color: Colors.grey.withValues(alpha: 0.15), // 中性灰底，不偏蓝
-        borderRadius: BorderRadius.circular(12),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => setState(() => _expanded = !_expanded),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
+    // 内容体（两种外壳共用）；扁平形态（收纳卡内）无灰底小卡，
+    // 条目由卡统一横线分割
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                     // 灯泡图标（参考 llama-ui 的 Reasoning 图标）
                     Icon(
                       Icons.lightbulb_outline,
@@ -9028,12 +9101,34 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                         )
                       : const SizedBox.shrink(),
                 ),
-              ],
-            ),
-          ),
-        ),
-      ),
+    ],
     );
+    return widget.flat
+        ? InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: body,
+            ),
+          )
+        : Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Material(
+              color: Colors.grey.withValues(alpha: 0.15), // 中性灰底，不偏蓝
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => setState(() => _expanded = !_expanded),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: body,
+                ),
+              ),
+            ),
+          );
   }
 }
 
