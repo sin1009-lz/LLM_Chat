@@ -742,6 +742,10 @@ class _HomePageState extends State<HomePage>
   /// LLM 流式响应中（禁发送、显示停止按钮）
   bool _isResponding = false;
 
+  /// send_image 暂存图片：响应结束时统一挂到最终回答消息
+  ///（与工具中间轮隔离）
+  final List<ImagePart> _pendingToolImages = [];
+
   /// ReAct 循环运行中（await-for 无法被 cancel 中断，用标志位让循环自行退出）
   bool _isReactRunning = false;
 
@@ -1596,14 +1600,11 @@ class _HomePageState extends State<HomePage>
   }
 
   /// 发图工具：读 Pyodide 虚拟文件系统里的图片文件（模型先用
-  /// run_python 保存，如 plt.savefig）→ ImagePart 挂到本条助手消息，
-  /// 聊天气泡直接显示；返回给模型的确认文本（成功以
-  /// [图片已发送 开头，调度侧据此判定成败）
-  Future<String> _sendImageTool(
-    Message target,
-    String path, {
-    String caption = '',
-  }) async {
+  /// run_python 保存，如 plt.savefig）→ 暂存 _pendingToolImages，
+  /// 响应结束时统一挂到【最后一轮正式输出】的消息上（与其余工具
+  /// 的中间轮隔离——图片永远伴随最终回答出现）；
+  /// 返回给模型的确认文本（成功以 [图片已发送 开头）
+  Future<String> _sendImageTool(String path, {String caption = ''}) async {
     final p = path.trim();
     if (p.isEmpty) return '[发送失败：path 参数为空]';
     try {
@@ -1627,17 +1628,13 @@ class _HomePageState extends State<HomePage>
       if (bytes.length > 8 << 20) return '[发送失败：图片超过 8MB，请压缩后重试]';
       final mime = _mimeFromName(p);
       final name = p.split('/').last;
-      if (!mounted) return '[发送失败：页面已退出]';
-      setState(() {
-        target.imageParts = [
-          ...?target.imageParts,
-          ImagePart(
-            name: name,
-            mimeType: mime,
-            dataUrl: 'data:$mime;base64,$b64',
-          ),
-        ];
-      });
+      _pendingToolImages.add(
+        ImagePart(
+          name: name,
+          mimeType: mime,
+          dataUrl: 'data:$mime;base64,$b64',
+        ),
+      );
       final kb = (bytes.length / 1024).round();
       return '[图片已发送给用户：$name（$kb KB）'
           '${caption.isEmpty ? '' : '，说明：$caption'}]';
@@ -1987,7 +1984,6 @@ class _HomePageState extends State<HomePage>
                 // 发图给用户：读 Python 保存的文件 → 挂到本条助手消息
                 // 的 imageParts（聊天气泡显示）；60s 超时兜底
                 final r = await _sendImageTool(
-                  current,
                   (args['path'] as String?) ?? '',
                   caption: (args['caption'] as String?) ?? '',
                 ).timeout(
@@ -2149,6 +2145,7 @@ class _HomePageState extends State<HomePage>
     if (_isResponding) return; // 已有响应进行中
     // 重置停止标志（ReAct 循环检查点用）
     _stopRequested = false;
+    _pendingToolImages.clear();
     _lastTruncated = false;
     // 复用最后一条「空助手消息」（重新生成场景：内容已清空，版本存于 versions），
     // 否则新增占位——避免重新生成后出现多余空消息
@@ -3043,11 +3040,20 @@ class _HomePageState extends State<HomePage>
     Message assistantMsg,
   ) async {
     _streamSub = null;
-    // 完全无内容（正文/思考/工具卡片全空）的助手消息：删除，不留空气泡
+    // send_image 暂存图片：统一挂到最终输出消息（伴随正式回答）
+    if (_pendingToolImages.isNotEmpty) {
+      assistantMsg.imageParts = [
+        ...?assistantMsg.imageParts,
+        ..._pendingToolImages,
+      ];
+      _pendingToolImages.clear();
+    }
+    // 完全无内容（正文/思考/工具卡片/图片全空）的助手消息：删除，不留空气泡
     // （模型空回答 / ReAct 最终轮无输出等场景）
     if (assistantMsg.content.trim().isEmpty &&
         (assistantMsg.thinking?.trim().isEmpty ?? true) &&
-        (assistantMsg.toolCalls?.isEmpty ?? true)) {
+        (assistantMsg.toolCalls?.isEmpty ?? true) &&
+        (assistantMsg.imageParts?.isEmpty ?? true)) {
       setState(() {
         conv.messages.remove(assistantMsg);
         _isResponding = false;
@@ -3127,6 +3133,14 @@ class _HomePageState extends State<HomePage>
     Object e,
   ) async {
     _streamSub = null;
+    // send_image 暂存图片：错误轮也保留（挂到错误消息上）
+    if (_pendingToolImages.isNotEmpty) {
+      assistantMsg.imageParts = [
+        ...?assistantMsg.imageParts,
+        ..._pendingToolImages,
+      ];
+      _pendingToolImages.clear();
+    }
     _stopStreamService();
     if (!mounted) return;
     setState(() {
@@ -4955,20 +4969,8 @@ class _HomePageState extends State<HomePage>
         onPickAttachments: _pickEditAttachments,
       );
     }
-    // 正文子项（思考块 / 气泡 / 工具卡 / 工具栏）
+    // 正文子项（气泡 / 工具卡 / 工具栏；思考块已提为全宽，见 return）
     final bodyChildren = <Widget>[
-              // 思考过程区（仅 assistant 且有 thinking 时显示，折叠/展开）。
-              // 思考深度关闭（0）时隐藏思考块——切换思考模式的实际可见效果；
-              // 例外：输出被截断/停止时显示（未完成的过程需可见）
-              // 文字替换：显示层应用规则（模型文本 → 显示文本）
-              if (!isUser &&
-                  (_thinkingDepth > 0 || m.truncated) &&
-                  (m.displayThinking?.isNotEmpty ?? false))
-                _thinkingBlock(
-                  context,
-                  _displayCached(m.displayThinking!),
-                  streaming: isStreamingTarget,
-                ),
               // 气泡本体（无阴影；助手灰色、用户品牌蓝）。
               // 无正式内容（仅工具调用）时不渲染；正在流式接收（打字点）除外
               if (hasBubbleContent || isStreamingTarget)
@@ -5164,17 +5166,37 @@ class _HomePageState extends State<HomePage>
     return RepaintBoundary(
       // 流式期间正在更新的气泡频繁重绘；RepaintBoundary 隔离各气泡，
       // 静态气泡不随之重绘（整列表只有一个脏区域）
-      child: Align(
-        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 思考过程区（仅 assistant 且有 thinking 时显示）：全宽——
+          // 不受气泡 82% 宽度约束，折叠/展开均为整行
+          if (!isUser &&
+              (_thinkingDepth > 0 || m.truncated) &&
+              (m.displayThinking?.isNotEmpty ?? false))
+            SizedBox(
+              width: double.infinity,
+              child: _thinkingBlock(
+                context,
+                _displayCached(m.displayThinking!),
+                streaming: isStreamingTarget,
+              ),
+            ),
+          // 气泡区：用户消息靠右、助手靠左，宽度上限 82%
+          Align(
+            alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+              ),
+              child: Column(
+                crossAxisAlignment: align,
+                children: bodyChildren,
+              ),
+            ),
           ),
-          child: Column(
-            crossAxisAlignment: align,
-            children: bodyChildren,
-          ),
-        ),
+        ],
       ),
     );
   }
