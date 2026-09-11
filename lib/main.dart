@@ -5431,11 +5431,19 @@ class _HomePageState extends State<HomePage>
         onPickAttachments: _pickEditAttachments,
       );
     }
+    // 轮次收纳：新一轮开启后（不再是最后一条消息），本轮的正文+
+    // 工具调用收录为一张卡（卡内横线分割），替代普通气泡形态
+    final isLastMsg = conv == null || conv.messages.last == m;
+    final roundCollected =
+        !isUser && !isLastMsg && (m.toolCalls?.isNotEmpty ?? false);
     // 正文子项（气泡 / 工具卡 / 工具栏；思考块已提为全宽，见 return）
     final bodyChildren = <Widget>[
+              // 轮次收纳卡：前一轮内容（正文+工具）收录一卡，横线分割
+              if (roundCollected)
+                _toolRoundCard(context, m)
               // 气泡本体（无阴影；助手灰色、用户品牌蓝）。
               // 无正式内容（仅工具调用）时不渲染；正在流式接收（打字点）除外
-              if (hasBubbleContent || isStreamingTarget)
+              else if (hasBubbleContent || isStreamingTarget)
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -5504,7 +5512,10 @@ class _HomePageState extends State<HomePage>
                 ),
               // 工具调用分割块（Claude 风格）：独立于气泡的灰底卡片，
               // 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次分割
-              if (!isUser && m.toolCalls != null && m.toolCalls!.isNotEmpty)
+              if (!roundCollected &&
+                  !isUser &&
+                  m.toolCalls != null &&
+                  m.toolCalls!.isNotEmpty)
                 _toolCallDivider(context, m),
               // 消息操作按钮行（工具栏：分支导航 + 复制/编辑/重新生成/删除）。
               // 分支导航 < n/N > 在工具栏行首。工具栏显示规则：
@@ -6436,6 +6447,37 @@ class _HomePageState extends State<HomePage>
         .where((t) => !t.silent)
         .toList();
     if (tcs.isEmpty) return const SizedBox.shrink();
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          // 独立底色（与气泡区分）：暗色更亮一档、亮色更暗一档
+          color: dark ? const Color(0xFF262626) : const Color(0xFFF2F2F2),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
+        ),
+        // 展开/收起动画：单一容器壳，内容切换由 AnimatedSize 平滑过渡
+        child: AnimatedSize(
+          alignment: Alignment.topLeft,
+          duration: const Duration(milliseconds: 220),
+          reverseDuration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          child: _toolDividerContent(context, m),
+        ),
+      ),
+    );
+  }
+
+  /// 工具卡内容（收起一槽厚 ↔ 完整卡）：外壳由调用方提供
+  ///（独立分隔块 / 轮次收纳卡两种宿主复用）
+  Widget _toolDividerContent(BuildContext context, Message m) {
+    final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
+        .where((t) => !t.silent)
+        .toList();
+    if (tcs.isEmpty) return const SizedBox.shrink();
     final grey = Colors.grey.shade700;
     final dark = Theme.of(context).brightness == Brightness.dark;
     // 状态汇总：任一工具仍在执行（resultCount == null）→ 调用中
@@ -6489,62 +6531,99 @@ class _HomePageState extends State<HomePage>
         ),
       ),
     );
-    final Widget content;
     if (collapsed) {
-      content = header(
+      return header(
         '工具调用：${tcs.first.name}',
         () => setState(() {
           m.toolCardExpanded = true;
           _renderEpoch++;
         }),
       );
-    } else {
-      content = Column(
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        header(
+          '工具调用',
+          running
+              ? null
+              : () => setState(() {
+                  m.toolCardExpanded = false;
+                  _renderEpoch++;
+                }),
+        ),
+        const SizedBox(height: 4),
+        // 全量展开（高度限制 360，工具很多时内部滚动）
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 360),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [for (final tc in tcs) _toolRow(context, tc)],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 轮次收纳卡：新一轮开启后，前一轮的正文 + 工具调用收录为一张卡，
+  /// 卡内条目之间以横线分割（thinking 块仍在其上方独立显示）
+  Widget _toolRoundCard(BuildContext context, Message m) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
+        .where((t) => !t.silent)
+        .toList();
+    final hasText = m.content.trim().isNotEmpty;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: dark ? const Color(0xFF262626) : const Color(0xFFF2F2F2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
+      ),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          header(
-            '工具调用',
-            running
-                ? null
-                : () => setState(() {
-                    m.toolCardExpanded = false;
-                    _renderEpoch++;
-                  }),
-          ),
-          const SizedBox(height: 4),
-          // 全量展开（高度限制 360，工具很多时内部滚动）
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 360),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [for (final tc in tcs) _toolRow(context, tc)],
-              ),
+          // 本轮正文（无壳直接渲染，与卡同底）
+          if (hasText)
+            _general.markdownEnabled
+                ? MarkdownView(
+                    text: _displayCached(m.displayContent),
+                    latexEnabled: _general.latexEnabled,
+                    mermaidEnabled: _general.mermaidEnabled,
+                    artifactsEnabled: _general.artifactsEnabled,
+                  )
+                : SelectableText(
+                    _displayCached(m.displayContent),
+                    style: Theme.of(context).textTheme.bodyLarge,
+                  ),
+          // 条目间横线分割
+          if (hasText && tcs.isNotEmpty)
+            Container(
+              height: 0.5,
+              margin: const EdgeInsets.symmetric(vertical: 8),
+              color: Colors.grey.withValues(alpha: 0.3),
             ),
-          ),
+          // 图片（如有）
+          if (m.imageParts?.isNotEmpty ?? false)
+            SizedBox(
+              width: double.infinity,
+              child: _imageGrid(context, m.imageParts!),
+            ),
+          // 工具部分（复用分隔块的收起/展开逻辑）
+          if (tcs.isNotEmpty)
+            AnimatedSize(
+              alignment: Alignment.topLeft,
+              duration: const Duration(milliseconds: 220),
+              reverseDuration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              child: _toolDividerContent(context, m),
+            ),
         ],
-      );
-    }
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          // 独立底色（与气泡区分）：暗色更亮一档、亮色更暗一档
-          color: dark ? const Color(0xFF262626) : const Color(0xFFF2F2F2),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
-        ),
-        // 展开/收起动画：单一容器壳，内容切换由 AnimatedSize 平滑过渡
-        child: AnimatedSize(
-          alignment: Alignment.topLeft,
-          duration: const Duration(milliseconds: 220),
-          reverseDuration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutCubic,
-          child: content,
-        ),
       ),
     );
   }
