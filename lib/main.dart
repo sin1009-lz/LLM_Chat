@@ -6732,27 +6732,33 @@ class _HomePageState extends State<HomePage>
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.grey.withValues(alpha: 0.25)),
       ),
-      // 整卡默认收起（一槽厚）↔ 展开全量；开合动画
+      // 整卡默认收起（一槽厚）↔ 展开全量；开合动画。开合点击只挂在
+      // 头部行——内容区（思考标签/正文/工具）各有自己的交互，
+      // 整卡级 InkWell 会抢走它们旁边的空白点击 = 误收整卡
       child: AnimatedSize(
         alignment: Alignment.topLeft,
         duration: const Duration(milliseconds: 220),
         reverseDuration: const Duration(milliseconds: 180),
         curve: Curves.easeOutCubic,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: () => setState(() {
-            first.roundsExpanded = !first.roundsExpanded;
-            _renderEpoch++;
-          }),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 2),
-            child: first.roundsExpanded
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [header, const SizedBox(height: 6), ...children],
-                  )
-                : header,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () => setState(() {
+                  first.roundsExpanded = !first.roundsExpanded;
+                  _renderEpoch++;
+                }),
+                child: header,
+              ),
+              if (first.roundsExpanded) ...[
+                const SizedBox(height: 6),
+                ...children,
+              ],
+            ],
           ),
         ),
       ),
@@ -8945,9 +8951,12 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
     final body = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
+        // 扁平形态标签占满整行（扩大点击区，避免偏一点点到外层）
+        SizedBox(
+          width: widget.flat ? double.infinity : null,
+          child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
                     // 灯泡图标（参考 llama-ui 的 Reasoning 图标）
                     Icon(
                       Icons.lightbulb_outline,
@@ -8969,7 +8978,8 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                       color: Colors.grey.shade700,
                     ),
                   ],
-                ),
+          ),
+        ),
                 // 展开/收起：AnimatedSize + 折叠态零尺寸（SizedBox.shrink）。
                 // 不用 AnimatedCrossFade：它的折叠尺寸取两个子项的最大宽，
                 // 收起后仍占满整行；shrink 让宽度随内容一起收缩。
