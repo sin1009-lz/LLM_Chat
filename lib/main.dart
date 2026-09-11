@@ -7511,8 +7511,19 @@ class _GlassInputBarState extends State<_GlassInputBar> {
           left: _hMargin,
           right: _hMargin,
         ),
-        // 输入栏容器
-        child: CupertinoLiquidGlass(
+        // 输入栏容器（外层柔影：悬浮感）
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(_radius),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.16),
+                blurRadius: 18,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: CupertinoLiquidGlass(
           blurSigma: 10, // 更模糊一点
           // tint 透明度：亮色 0.28（默认）、暗色 0.12——保持玻璃半透明，
           // 过高（0.6）会变成白色实色
@@ -7613,6 +7624,7 @@ class _GlassInputBarState extends State<_GlassInputBar> {
             ],
           ),
         ),
+        ), // 输入栏柔影 Container
       ),
     );
   }
