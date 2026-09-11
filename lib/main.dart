@@ -767,9 +767,94 @@ class _HomePageState extends State<HomePage>
 
   /// 滚动通知：跟踪用户手指拖动（当前无抢滚动逻辑，保留供调试）
 
+  /// ── 对话问题导航（ZCode TurnNavigator 式）：快速滚动时左缘浮现
+  /// 「问题轨迹」——每个用户问题一条小横杠，当前所在问题高亮，
+  /// 邻近按距离衰减宽度/亮度；点击跳到该问题，长按预览问题内容。
+  /// ValueNotifier 驱动独立子树，滚动帧不重建 HomePage
+  final ValueNotifier<({int active, int count})?> _turnNav =
+      ValueNotifier(null);
+
+  /// 导航条用户问题索引列表（惰性）
+  List<int> _turnNavIndices = const [];
+
+  List<int> _turnNavUserIndices() {
+    final msgs = _currentConversation?.messages;
+    if (msgs == null) return const [];
+    if (_turnNavIndices.length ==
+        msgs.where((m) => m.role == Role.user).length) {
+      return _turnNavIndices; // 缓存（长度未变）
+    }
+    final out = <int>[];
+    for (var i = 0; i < msgs.length; i++) {
+      if (msgs[i].role == Role.user) out.add(i);
+    }
+    _turnNavIndices = out;
+    return out;
+  }
+
+  Timer? _turnNavHideTimer;
+  double _tnLastPixels = 0;
+  DateTime _tnLastTs = DateTime.now();
+
   bool _onScrollNotification(ScrollNotification n) {
+    if (n.depth != 0) return false;
+    if (n is ScrollUpdateNotification) {
+      final now = DateTime.now();
+      final dt = now.difference(_tnLastTs).inMicroseconds;
+      if (dt > 0) {
+        final speed =
+            (n.metrics.pixels - _tnLastPixels).abs() / (dt / 1000);
+        final idxs = _turnNavUserIndices();
+        // 快速滚动（疾速滑动）且有 ≥2 个问题时浮现
+        if (speed > 1.0 && idxs.length >= 2 && n.metrics.maxScrollExtent > 100) {
+          final f = (n.metrics.pixels / n.metrics.maxScrollExtent).clamp(
+            0.0,
+            1.0,
+          );
+          final msgs = _currentConversation!.messages;
+          final est = (f * (msgs.length - 1)).round().clamp(
+            0,
+            msgs.length - 1,
+          );
+          // 最近的问题（向后找最近用户消息，找不到则向前）
+          var active = 0;
+          for (var k = 0; k < idxs.length; k++) {
+            if (idxs[k] <= est) {
+              active = k;
+            } else {
+              break;
+            }
+          }
+          if (_turnNav.value == null || _turnNav.value!.active != active) {
+            _turnNav.value = (active: active, count: idxs.length);
+          }
+          _turnNavHideTimer?.cancel();
+          _turnNavHideTimer = Timer(const Duration(milliseconds: 2200), () {
+            _turnNav.value = null;
+          });
+        }
+      }
+      _tnLastPixels = n.metrics.pixels;
+      _tnLastTs = now;
+    }
     return false;
   }
+
+  /// 跳到第 questionIndex 个用户问题（比例估算偏移）
+  void _jumpToQuestion(int questionIndex) {
+    if (!_chatScroll.hasClients) return;
+    final idxs = _turnNavUserIndices();
+    if (questionIndex < 0 || questionIndex >= idxs.length) return;
+    final msgs = _currentConversation!.messages;
+    final f = idxs[questionIndex] / math.max(1, msgs.length - 1);
+    _chatScroll.jumpTo(
+      (f * _chatScroll.position.maxScrollExtent).clamp(
+        0.0,
+        _chatScroll.position.maxScrollExtent,
+      ),
+    );
+  }
+
 
   ChatStore? _store;
 
@@ -4681,6 +4766,8 @@ class _HomePageState extends State<HomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _streamTick.dispose();
+    _turnNavHideTimer?.cancel();
+    _turnNav.dispose();
     _inputBarAnimatedTop.dispose();
     _tts?.stop();
     _streamSub?.cancel();
@@ -4928,6 +5015,8 @@ class _HomePageState extends State<HomePage>
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
           ),
         ),
+        // ── 问题导航条（快速滚动浮现，ZCode TurnNavigator 式）──
+        Positioned.fill(child: _turnNavBar(context)),
         // ── Python 内核宿主：2×2 像素 WebView 负坐标移出视口 ──
         // WebView 必须挂树才会加载执行；零尺寸会挂起，故用最小尺寸 +
         // 移出可见区（不吃光栅资源，见启动 OOM 教训）
@@ -6480,6 +6569,119 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
+  /// 问题导航条（ZCode TurnNavigator 式）：左缘垂直居中的问题轨迹。
+  /// 每个用户问题一条 2px 横杠，当前问题高亮加宽，邻近按距离衰减；
+  /// 点击跳到该问题，长按预览问题文本
+  Widget _turnNavBar(BuildContext context) {
+    return ValueListenableBuilder<({int active, int count})?>(
+      valueListenable: _turnNav,
+      builder: (context, state, _) {
+        final visible = state != null;
+        return IgnorePointer(
+          ignoring: !visible,
+          child: AnimatedOpacity(
+            opacity: visible ? 1 : 0,
+            duration: const Duration(milliseconds: 180),
+            child: state == null
+                ? const SizedBox.shrink()
+                : LayoutBuilder(
+                    builder: (context, c) {
+                      final idxs = _turnNavUserIndices();
+                      // 条目多时压缩间距，轨迹总高不超过 55% 屏高
+                      final spacing = math.min(
+                        10.0,
+                        (c.maxHeight * 0.55) / math.max(1, state.count),
+                      );
+                      final totalH = spacing * state.count;
+                      final fg = Theme.of(
+                        context,
+                      ).colorScheme.onSurface;
+                      return Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 4),
+                          child: SizedBox(
+                            width: 36,
+                            height: totalH,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                for (var i = 0; i < state.count; i++)
+                                  Positioned(
+                                    top: i * spacing,
+                                    left: 0,
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      // 命中区放大到 spacing 高
+                                      child: SizedBox(
+                                        width: 32,
+                                        height: math.max(spacing, 14),
+                                        child: Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: Builder(
+                                            builder: (context) {
+                                              final dist = (i - state.active)
+                                                  .abs();
+                                              final active = i == state.active;
+                                              // 距离衰减：宽度 16→6、亮度 0.95→0.25
+                                              final w = active
+                                                  ? 16.0
+                                                  : math.max(
+                                                      6.0,
+                                                      13.0 - dist * 1.6,
+                                                    );
+                                              final op = active
+                                                  ? 0.95
+                                                  : math.max(
+                                                      0.25,
+                                                      0.9 - dist * 0.12,
+                                                    );
+                                              return Container(
+                                                width: w,
+                                                height: 2.5,
+                                                decoration: BoxDecoration(
+                                                  color: fg.withValues(
+                                                    alpha: op,
+                                                  ),
+                                                  borderRadius:
+                                                      BorderRadius.circular(
+                                                        2,
+                                                      ),
+                                                ),
+                                              );
+                                            },
+                                          ),
+                                        ),
+                                      ),
+                                      onTap: () => _jumpToQuestion(i),
+                                      onLongPress: () {
+                                        final idxs2 = _turnNavUserIndices();
+                                        if (i < idxs2.length) {
+                                          final msgs =
+                                              _currentConversation!.messages;
+                                          final q = msgs[idxs2[i]].content;
+                                          _toast(
+                                            q.length > 60
+                                                ? '${q.substring(0, 60)}…'
+                                                : q,
+                                          );
+                                        }
+                                      },
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        );
+      },
+    );
+  }
+
   /// 该消息是否为「已收纳轮次组的非首成员」（渲染为空 + 外边距归零；
   /// 卡片由组首渲染）
   bool isCollapsedToolMember(Message m) {
