@@ -6022,11 +6022,8 @@ class _HomePageState extends State<HomePage>
               ),
               const Spacer(),
               Text(
-                '完成${tcs.length}个工具',
-                style: labelSmall?.copyWith(
-                  color: success,
-                  fontWeight: FontWeight.w600,
-                ),
+                '完成 ${tcs.length} 个工具',
+                style: labelSmall?.copyWith(color: success),
               ),
               const SizedBox(width: 2),
               Icon(Icons.expand_more, size: 16, color: grey),
