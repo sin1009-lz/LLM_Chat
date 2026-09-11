@@ -1665,6 +1665,76 @@ class _HomePageState extends State<HomePage>
     }
   }
 
+  /// 本地网页阅读器：隐藏 WebView（Python 内核同款宿主方式）。
+  /// 渲染 JS 页面后取 innerText（可见文本，质量优于对原始 HTML 的
+  /// 正则提取）；完全本地，不把网址发给第三方
+  WebViewController? _webReader;
+
+  Future<void> _ensureWebReader() async {
+    if (_webReader != null) return;
+    final c = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setUserAgent(
+        'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36',
+      );
+    _webReader = c;
+    if (mounted) setState(() {});
+    await WidgetsBinding.instance.endOfFrame;
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+  }
+
+  /// WebView 渲染读取：load → 等 readyState complete → 取 innerText。
+  /// 返回 null 表示失败（调用方降级）
+  Future<({String title, String text})?> _readViaWebView(String url) async {
+    try {
+      await _ensureWebReader();
+      final k = _webReader!;
+      await k.loadRequest(Uri.parse(url));
+      // 最多等 25s 至加载完成
+      var ready = false;
+      for (var i = 0; i < 50; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        try {
+          final r = await k.runJavaScriptReturningResult('document.readyState');
+          var v = r.toString();
+          if (v.length >= 2 && v.startsWith('"')) v = v.substring(1, v.length - 1);
+          if (v == 'complete') {
+            ready = true;
+            break;
+          }
+        } catch (_) {}
+      }
+      if (!ready) return null;
+      // JS 渲染余量（骨架屏二次填充）
+      await Future<void>.delayed(const Duration(milliseconds: 800));
+      const js = r'''
+(function(){
+  try {
+    var el = document.querySelector('article')
+      || document.querySelector('main')
+      || document.body;
+    var text = (el ? (el.innerText || '') : '');
+    if (text.length > 30000) text = text.slice(0, 30000);
+    return JSON.stringify({ t: document.title || '', c: text });
+  } catch (e) { return '{}'; }
+})()
+''';
+      final raw = await k.runJavaScriptReturningResult(js);
+      var str = raw.toString();
+      if (str.length >= 2 && str.startsWith('"') && str.endsWith('"')) {
+        // evaluateJavascript 返回 JSON 字符串字面量：去引号
+        str = str.substring(1, str.length - 1);
+      }
+      final j = jsonDecode(str) as Map<String, dynamic>;
+      final title = (j['t'] as String? ?? '').trim();
+      final text = (j['c'] as String? ?? '').trim();
+      if (text.isEmpty) return null;
+      return (title: title, text: text);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 网页正文读取上限（字符）
   static const int _kMaxWebChars = 20000;
 
@@ -4578,6 +4648,17 @@ class _HomePageState extends State<HomePage>
               width: 2,
               height: 2,
               child: IgnorePointer(child: WebViewWidget(controller: _pyKernel!)),
+            ),
+          ),
+        // 本地网页阅读器宿主（read_webpage 的 WebView 渲染）
+        if (_webReader != null)
+          Positioned(
+            left: -2,
+            top: -2,
+            child: SizedBox(
+              width: 2,
+              height: 2,
+              child: IgnorePointer(child: WebViewWidget(controller: _webReader!)),
             ),
           ),
       ],
