@@ -1196,6 +1196,9 @@ class _HomePageState extends State<HomePage>
         if (_general.builtinSearchEnabled) _builtinToolDefs[2],
         // 读网页：联网能力，与搜索同一开关
         if (_general.builtinSearchEnabled) _builtinToolDefs[5],
+        // 查看图片：仅多模态模型（图片作为视觉输入）
+        if (_general.builtinSearchEnabled && _modelSupportsMultimodal)
+          _builtinToolDefs[6],
         if (_general.builtinPythonEnabled) _builtinToolDefs[3],
         // 发图工具依赖 Python 内核产文件，同一开关
         if (_general.builtinPythonEnabled) _builtinToolDefs[4],
@@ -1305,11 +1308,11 @@ class _HomePageState extends State<HomePage>
       'function': {
         'name': kBuiltinSendImageTool,
         'description':
-            '把一张图片发送给用户（显示在聊天中）。图片来源：先用 '
-            'run_python 生成并保存的图片文件（如 plt.savefig("out.png")、'
-            'PIL 的 im.save("a.jpg")）。当用户要你画图/生成图片/输出图像、'
-            '或你产出的图表需要用户直接看到时调用。每次发送一张，'
-            '多张图多次调用。',
+            '把一张图片发送给用户（显示在聊天中）。图片来源：① run_python '
+            '生成并保存的图片文件（如 plt.savefig("out.png")）；② 网页里的'
+            '图片地址（read_webpage 返回的 URL，path 直接传 URL 即可）。'
+            '当用户要你画图/生成图片/输出图像、或要把网页里的图片给用户'
+            '看时调用。每次发送一张，多张图多次调用。',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -1339,6 +1342,27 @@ class _HomePageState extends State<HomePage>
           'type': 'object',
           'properties': {
             'url': {'type': 'string', 'description': '要读取的网页地址'},
+          },
+          'required': ['url'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': kBuiltinViewImageTool,
+        'description':
+            '查看一张图片：把图片作为视觉输入提供给你（你可以直接看到'
+            '图片内容）。来源可以是网页里的图片地址（read_webpage 返回的'
+            ' URL），也可以是 run_python 保存的图片文件路径。需要识别/'
+            '理解图片内容时调用。',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'url': {
+              'type': 'string',
+              'description': '图片地址（http/https）或 Python 保存的文件路径',
+            },
           },
           'required': ['url'],
         },
@@ -1629,6 +1653,35 @@ class _HomePageState extends State<HomePage>
   Future<String> _sendImageTool(String path, {String caption = ''}) async {
     final p = path.trim();
     if (p.isEmpty) return '[发送失败：path 参数为空]';
+    // http(s) URL：直接下载（网页图片发送）
+    if (p.startsWith('http://') || p.startsWith('https://')) {
+      try {
+        final res = await http
+            .get(Uri.parse(p))
+            .timeout(const Duration(seconds: 15));
+        final ct =
+            (res.headers['content-type'] ?? '').split(';').first.trim();
+        if (res.statusCode == 200 &&
+            ct.startsWith('image/') &&
+            res.bodyBytes.isNotEmpty &&
+            res.bodyBytes.length <= 8 << 20) {
+          final b64 = base64Encode(res.bodyBytes);
+          _pendingToolImages.add(
+            ImagePart(
+              name: p.split('/').last.split('?').first,
+              mimeType: ct,
+              dataUrl: 'data:$ct;base64,$b64',
+            ),
+          );
+          final kb = (res.bodyBytes.length / 1024).round();
+          return '[图片已发送给用户：$p（$kb KB）'
+              '${caption.isEmpty ? '' : '，说明：$caption'}]';
+        }
+        return '[发送失败：URL 不是有效图片（$p，类型 $ct）]';
+      } catch (e) {
+        return '[发送失败：$e]';
+      }
+    }
     try {
       await _ensurePyKernel();
       final k = _pyKernel;
@@ -1685,7 +1738,9 @@ class _HomePageState extends State<HomePage>
 
   /// WebView 渲染读取：load → 等 readyState complete → 取 innerText。
   /// 返回 null 表示失败（调用方降级）
-  Future<({String title, String text})?> _readViaWebView(String url) async {
+  Future<({String title, String text, List<String> images})?> _readViaWebView(
+    String url,
+  ) async {
     try {
       await _ensureWebReader();
       final k = _webReader!;
@@ -1715,7 +1770,18 @@ class _HomePageState extends State<HomePage>
       || document.body;
     var text = (el ? (el.innerText || '') : '');
     if (text.length > 30000) text = text.slice(0, 30000);
-    return JSON.stringify({ t: document.title || '', c: text });
+    var imgs = [];
+    var seen = {};
+    var all = document.querySelectorAll('img');
+    for (var k = 0; k < all.length && imgs.length < 8; k++) {
+      var im = all[k];
+      var u = im.currentSrc || im.src || '';
+      if (!u || seen[u] || u.indexOf('http') !== 0) continue;
+      var w = im.naturalWidth || im.width || 0;
+      var h = im.naturalHeight || im.height || 0;
+      if (w >= 200 && h >= 150) { seen[u] = 1; imgs.push(u); }
+    }
+    return JSON.stringify({ t: document.title || '', c: text, i: imgs });
   } catch (e) { return '{}'; }
 })()
 ''';
@@ -1729,7 +1795,75 @@ class _HomePageState extends State<HomePage>
       final title = (j['t'] as String? ?? '').trim();
       final text = (j['c'] as String? ?? '').trim();
       if (text.isEmpty) return null;
-      return (title: title, text: text);
+      final imgs = (j['i'] as List? ?? const [])
+          .whereType<String>()
+          .toList();
+      return (title: title, text: text, images: imgs);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static const kBuiltinViewImageTool = 'builtin__view_image';
+
+  /// 下载网页图片（并行，单张 ≤2MB、image/*）→ data URL 列表
+  Future<List<String>> _downloadWebImages(List<String> urls) async {
+    final out = await Future.wait(
+      urls.take(6).map((u) async {
+        try {
+          final res = await http
+              .get(Uri.parse(u))
+              .timeout(const Duration(seconds: 12));
+          final ct = (res.headers['content-type'] ?? '').split(';').first.trim();
+          if (res.statusCode == 200 &&
+              ct.startsWith('image/') &&
+              res.bodyBytes.isNotEmpty &&
+              res.bodyBytes.length <= 2 << 20) {
+            return 'data:$ct;base64,${base64Encode(res.bodyBytes)}';
+          }
+        } catch (_) {}
+        return null;
+      }),
+    );
+    return out.whereType<String>().toList();
+  }
+
+  /// view_image：取图片（http(s) URL 下载，或 Pyodide 文件）→ dataUrl
+  ///（给 tool 消息做视觉输入用）。失败返回 null
+  Future<String?> _fetchImageForView(String urlOrPath) async {
+    final p = urlOrPath.trim();
+    if (p.isEmpty) return null;
+    try {
+      if (p.startsWith('http://') || p.startsWith('https://')) {
+        final res = await http
+            .get(Uri.parse(p))
+            .timeout(const Duration(seconds: 15));
+        final ct =
+            (res.headers['content-type'] ?? '').split(';').first.trim();
+        if (res.statusCode == 200 &&
+            ct.startsWith('image/') &&
+            res.bodyBytes.isNotEmpty &&
+            res.bodyBytes.length <= 4 << 20) {
+          return 'data:$ct;base64,${base64Encode(res.bodyBytes)}';
+        }
+        return null;
+      }
+      // Pyodide 文件（run_python 保存的图）
+      await _ensurePyKernel();
+      final k = _pyKernel;
+      if (k == null) return null;
+      final r = await k.runJavaScriptReturningResult(
+        'window.readPyFile ? window.readPyFile(' +
+            jsonEncode(p) +
+            ') : ""',
+      );
+      var b64 = r.toString();
+      if (b64.length >= 2 && b64.startsWith('"') && b64.endsWith('"')) {
+        b64 = b64.substring(1, b64.length - 1);
+      }
+      if (b64.isEmpty) return null;
+      final mime = _mimeFromName(p);
+      return 'data:$mime;base64,$b64';
     } catch (_) {
       return null;
     }
@@ -1742,9 +1876,15 @@ class _HomePageState extends State<HomePage>
   /// 正文提取，返回干净的 Markdown——Cherry Studio 等客户端的默认方案），
   /// 失败回退本地抓取 + HTML 正文提取（compute 隔离，隐私不外发）。
   /// 返回给模型的文本；失败以 [读取失败 开头（调度侧据此判败）
-  Future<String> _readWebpage(String url) async {
+  /// 读网页：返回 (给模型的文本, 网页图片 URL 列表)。
+  /// 两级本地链路（不发第三方）：直接抓取+提取（快，静态页一步
+  /// 到位，正则收集 img src）→ 本地 WebView 渲染（JS 页面，取
+  /// innerText + JS 过滤收集图片）。失败以 [读取失败 开头
+  Future<({String text, List<String> images})> _readWebpage(String url) async {
     var target = url.trim();
-    if (target.isEmpty) return '[读取失败：url 为空]';
+    if (target.isEmpty) {
+      return (text: '[读取失败：url 为空]', images: const <String>[]);
+    }
     if (!target.startsWith('http://') && !target.startsWith('https://')) {
       target = 'https://$target';
     }
@@ -1756,47 +1896,66 @@ class _HomePageState extends State<HomePage>
     String cap(String t) => t.length > _kMaxWebChars
         ? '${t.substring(0, _kMaxWebChars)}\n…[内容过长，已截断至 $_kMaxWebChars 字符]'
         : t;
-    // 1) Jina Reader：前缀代理，无 key 免费额度（有速率限制）
-    try {
-      final res = await http
-          .get(Uri.parse('https://r.jina.ai/$target'), headers: ua)
-          .timeout(const Duration(seconds: 20));
-      if (res.statusCode == 200 && res.body.trim().isNotEmpty) {
-        return '网页内容（$target，经 Jina Reader 提取）：\n${cap(res.body.trim())}';
-      }
-    } catch (_) {}
-    // 2) 本地回退：直接抓取
+    // 1) 直接抓取 + 本地提取（纯静态页一步到位）
     try {
       final res = await http
           .get(Uri.parse(target), headers: ua)
           .timeout(const Duration(seconds: 15));
-      if (res.statusCode != 200) {
-        return '[读取失败：HTTP ${res.statusCode}（$target）]';
-      }
-      if (res.bodyBytes.length > 3 << 20) {
-        return '[读取失败：内容超过 3MB]';
-      }
-      final ct = (res.headers['content-type'] ?? '').toLowerCase();
-      final raw = utf8.decode(res.bodyBytes, allowMalformed: true);
-      if (ct.contains('html') ||
-          RegExp(r'<html|<!doctype', caseSensitive: false).hasMatch(raw.substring(0, raw.length.clamp(0, 2000)))) {
-        final (title, body) = await compute(_extractWebHtml, raw);
-        if (body.trim().isEmpty) {
-          return '[读取失败：未提取到正文（可能是 JS 渲染页面，可稍后重试）]';
+      if (res.statusCode == 200 && res.bodyBytes.length <= 3 << 20) {
+        final ct = (res.headers['content-type'] ?? '').toLowerCase();
+        final raw = utf8.decode(res.bodyBytes, allowMalformed: true);
+        final looksHtml =
+            ct.contains('html') ||
+            RegExp(
+              r'<html|<!doctype',
+              caseSensitive: false,
+            ).hasMatch(raw.substring(0, raw.length.clamp(0, 2000)));
+        if (!looksHtml) {
+          // 纯文本类（json/xml/plain）直接返回
+          return (
+            text: '网页内容（$target）：\n${cap(raw.trim())}',
+            images: const <String>[],
+          );
         }
-        return '网页内容（$target，本地提取）：'
-            '\n标题：$title'
-            '\n${cap(body)}';
+        final (title, body) = await compute(_extractWebHtml, raw);
+        if (body.trim().length >= 500) {
+          // 静态页图片：正则收集 article 段 img src（绝对化）
+          final base = Uri.parse(target);
+          final imgs = <String>[];
+          for (final m in RegExp(r'<img[^>]+src="([^"]+)"').allMatches(raw)) {
+            final src = m.group(1)!;
+            if (src.startsWith('data:')) continue;
+            final abs = base.resolve(src).toString();
+            if (abs.startsWith('http') && !imgs.contains(abs)) imgs.add(abs);
+            if (imgs.length >= 8) break;
+          }
+          return (
+            text:
+                '网页内容（$target，本地提取）：'
+                '\n标题：$title'
+                '\n${cap(body)}',
+            images: imgs,
+          );
+        }
+        // 提取过少（疑似 JS 渲染壳）→ 落到 WebView
       }
-      // 纯文本类（json/xml/plain）
-      return '网页内容（$target）：\n${cap(raw.trim())}';
-    } catch (e) {
-      return '[读取失败：$e]';
+    } catch (_) {}
+    // 2) 本地 WebView 渲染读取（JS 页面；完全本地）
+    final wv = await _readViaWebView(target);
+    if (wv != null && wv.text.trim().isNotEmpty) {
+      return (
+        text:
+            '网页内容（$target，本地渲染）：'
+            '${wv.title.isEmpty ? '' : '\n标题：${wv.title}'}'
+            '\n${cap(wv.text)}',
+        images: wv.images,
+      );
     }
+    return (
+      text: '[读取失败：无法获取 $target 的内容（本地抓取与渲染均未得到正文）]',
+      images: const <String>[],
+    );
   }
-
-  /// article/main/body，块级标签转换行，实体解码，空行压缩
-
 
 /// DeepSeek 原生联网搜索（Anthropic 兼容端点 + web_search_20250305
   /// 服务端工具，同 @deepseek-ai/dsh-web-search-deepseek 的做法）：
@@ -2110,6 +2269,8 @@ class _HomePageState extends State<HomePage>
           // 执行工具：内置工具走本地执行，MCP 工具走远程调用
           String resultText;
           int resultCode;
+          // view_image 的视觉输入（非空时 tool 消息 content 用多模态数组）
+          String? viewImageDataUrl;
           try {
             if (call.name.startsWith('builtin__')) {
               final args = _parseArgs(call.args);
@@ -2148,14 +2309,26 @@ class _HomePageState extends State<HomePage>
                 resultText = r;
                 resultCode = resultText.startsWith('[图片已发送') ? 1 : -1;
               } else if (call.name == kBuiltinReadWebTool) {
-                // 读网页：Jina Reader 优先 + 本地提取回退；40s 网络超时
+                // 读网页（本地两级链路）；60s 网络超时
                 final r = await _readWebpage(
                   (args['url'] as String?) ?? (args['query'] as String?) ?? '',
                 ).timeout(
-                  const Duration(seconds: 40),
-                  onTimeout: () => '[读取超时（40 秒），请稍后重试]',
+                  const Duration(seconds: 60),
+                  onTimeout: () => (
+                    text: '[读取超时（60 秒），请稍后重试]',
+                    images: const <String>[],
+                  ),
                 );
-                resultText = r;
+                resultText = r.text;
+                if (r.images.isNotEmpty) {
+                  // 图片 URL 列表告知模型（view_image 查看 / send_image 发送）
+                  resultText +=
+                      '\n[网页图片 ${r.images.length} 张，可用 view_image(url) 查看或 '
+                      'send_image(path=url) 发送给用户：${r.images.take(8).join(' ')}]';
+                  // 下载进工具卡（点开即可看）
+                  final dl = await _downloadWebImages(r.images);
+                  if (dl.isNotEmpty) card.images = dl;
+                }
                 card.output = resultText.length > 4000
                     ? '${resultText.substring(0, 4000)}…'
                     : resultText;
@@ -2163,6 +2336,23 @@ class _HomePageState extends State<HomePage>
                         resultText.startsWith('[读取超时')
                     ? -1
                     : resultText.length;
+              } else if (call.name == kBuiltinViewImageTool) {
+                // 查看图片：下载 → 作为视觉输入注入 tool 消息
+                final du = await _fetchImageForView(
+                  (args['url'] as String?) ?? (args['path'] as String?) ?? '',
+                ).timeout(
+                  const Duration(seconds: 30),
+                  onTimeout: () => null,
+                );
+                if (du == null) {
+                  resultText = '[查看失败：无法获取图片（URL 无效/超时/非图片）]';
+                  resultCode = -1;
+                } else {
+                  viewImageDataUrl = du;
+                  resultText = '[图片已提供给你查看，见本条工具消息的图片内容]';
+                  resultCode = 1;
+                }
+                card.output = resultText;
               } else {
                 resultText =
                     await _execBuiltinTool(
@@ -2197,7 +2387,17 @@ class _HomePageState extends State<HomePage>
           toolMessages.add({
             'role': 'tool',
             'tool_call_id': toolCallId,
-            'content': resultText,
+            // view_image：图片作为视觉输入（content 多模态数组，
+            // 兼容接受 image_url 的端点；纯文本模型不注册本工具）
+            'content': viewImageDataUrl != null
+                ? [
+                    {'type': 'text', 'text': resultText},
+                    {
+                      'type': 'image_url',
+                      'image_url': {'url': viewImageDataUrl},
+                    },
+                  ]
+                : resultText,
           });
         }
         // 统一追加：一条 assistant（完整 tool_calls）+ 全部 tool 响应
