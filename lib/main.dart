@@ -768,9 +768,15 @@ class _HomePageState extends State<HomePage>
 
   /// 滚动通知：跟踪用户手指拖动（当前无抢滚动逻辑，保留供调试）
 
-  /// 上滑快捷导航（ChatBox 式）：离开底部时浮现「回到顶部/上一条
-  /// 消息/回到底部」。ValueNotifier 驱动独立子树，滚动帧不重建主页
+  /// 上滑快捷导航（ChatBox 式）。两类触发：
+  /// · 回到底部：离开底部 >320px 持续显示，贴回隐藏（滞回）
+  /// · 回到顶部/上一条消息：仅【快速上滑】（>1.2px/ms 向上）时浮现，
+  ///   2.2s 静止自动隐去
   final ValueNotifier<bool> _awayFromBottom = ValueNotifier(false);
+  final ValueNotifier<bool> _fastNavVisible = ValueNotifier(false);
+  Timer? _fastNavTimer;
+  double _qnLastPixels = 0;
+  DateTime _qnLastTs = DateTime.now();
 
   bool _onScrollNotification(ScrollNotification n) {
     if (n.depth == 0 &&
@@ -783,6 +789,24 @@ class _HomePageState extends State<HomePage>
       } else if (away && ext < 60) {
         _awayFromBottom.value = false;
       }
+    }
+    // 快速上滑检测（向上 + 高速）→ 顶部/上一条按钮浮现
+    if (n.depth == 0 && n is ScrollUpdateNotification) {
+      final now = DateTime.now();
+      final dt = now.difference(_qnLastTs).inMicroseconds;
+      if (dt > 0) {
+        final d = n.metrics.pixels - _qnLastPixels;
+        final speed = d.abs() / (dt / 1000);
+        if (d < 0 && speed > 1.2 && n.metrics.pixels > 60) {
+          if (!_fastNavVisible.value) _fastNavVisible.value = true;
+          _fastNavTimer?.cancel();
+          _fastNavTimer = Timer(const Duration(milliseconds: 2200), () {
+            _fastNavVisible.value = false;
+          });
+        }
+      }
+      _qnLastPixels = n.metrics.pixels;
+      _qnLastTs = now;
     }
     return false;
   }
@@ -4797,6 +4821,8 @@ class _HomePageState extends State<HomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _streamTick.dispose();
+    _fastNavTimer?.cancel();
+    _fastNavVisible.dispose();
     _awayFromBottom.dispose();
     _inputBarAnimatedTop.dispose();
     _tts?.stop();
@@ -5042,58 +5068,82 @@ class _HomePageState extends State<HomePage>
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
           ),
         ),
-        // ── 上滑快捷导航（ChatBox 式）：离开底部浮现 ──
-        // 回到顶部 / 上一条消息 / 回到底部；贴回底部隐去。
-        // 底部跟随输入栏（含键盘/多行增高，_inputBarTop 实时）
+        // ── 上滑快捷导航（ChatBox 式，竖排）──
+        // 回到底部：离开底部持续显示；回到顶部/上一条：快速上滑
+        // 才浮现（2.2s 隐去）。底部实时跟随输入栏真实高度
+        //（_inputBarAnimatedTop = SizeReporter 逐帧上报，防干涉）
         Positioned(
-          right: 14,
-          bottom: keyboardInset + 8,
-          child: ValueListenableBuilder<bool>(
-            valueListenable: _awayFromBottom,
-            builder: (context, away, _) => ValueListenableBuilder<double>(
-              valueListenable: _inputBarTop,
-              builder: (context, inputTop, _) => Padding(
-                padding: EdgeInsets.only(bottom: inputTop),
-                child: AnimatedScale(
-                  scale: away ? 1.0 : 0.5,
-                  duration: const Duration(milliseconds: 160),
-                  curve: Curves.easeOutCubic,
-                  child: AnimatedOpacity(
-                    opacity: away ? 1.0 : 0.0,
-                    duration: const Duration(milliseconds: 160),
-                    child: IgnorePointer(
-                      ignoring: !away,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _quickJumpBtn(
-                            icon: Icons.vertical_align_top,
-                            tooltip: '回到顶部',
-                            onTap: () => _chatScroll.hasClients
-                                ? _chatScroll.jumpTo(0)
-                                : null,
+          right: 12,
+          bottom: keyboardInset,
+          child: ValueListenableBuilder<double>(
+            valueListenable: _inputBarAnimatedTop,
+            builder: (context, inputTop, _) => Padding(
+              padding: EdgeInsets.only(bottom: inputTop + 10),
+              child: ValueListenableBuilder<bool>(
+                valueListenable: _fastNavVisible,
+                builder: (context, fast, _) => ValueListenableBuilder<bool>(
+                  valueListenable: _awayFromBottom,
+                  builder: (context, away, _) {
+                    final showFast = fast && away;
+                    return AnimatedScale(
+                      scale: away ? 1.0 : 0.5,
+                      duration: const Duration(milliseconds: 160),
+                      curve: Curves.easeOutCubic,
+                      child: AnimatedOpacity(
+                        opacity: away ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 160),
+                        child: IgnorePointer(
+                          ignoring: !away,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // 回到顶部 / 上一条：快速上滑时淡入
+                              AnimatedSize(
+                                duration: const Duration(
+                                  milliseconds: 180,
+                                ),
+                                curve: Curves.easeOutCubic,
+                                alignment: Alignment.bottomCenter,
+                                child: showFast
+                                    ? Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          _glassNavBtn(
+                                            icon: Icons.vertical_align_top,
+                                            tooltip: '回到顶部',
+                                            onTap: () => _chatScroll.hasClients
+                                                ? _chatScroll.jumpTo(0)
+                                                : null,
+                                          ),
+                                          const SizedBox(height: 10),
+                                          _glassNavBtn(
+                                            icon:
+                                                Icons.keyboard_double_arrow_up,
+                                            tooltip: '上一条消息',
+                                            onTap: _jumpToPrevUserMessage,
+                                          ),
+                                          const SizedBox(height: 10),
+                                        ],
+                                      )
+                                    : const SizedBox.shrink(),
+                              ),
+                              // 回到底部：离开底部持续显示
+                              _glassNavBtn(
+                                icon: Icons.keyboard_double_arrow_down,
+                                tooltip: '回到底部',
+                                onTap: () {
+                                  if (!_chatScroll.hasClients) return;
+                                  _chatScroll.jumpTo(
+                                    _chatScroll.position.maxScrollExtent,
+                                  );
+                                },
+                              ),
+                            ],
                           ),
-                          const SizedBox(width: 8),
-                          _quickJumpBtn(
-                            icon: Icons.keyboard_double_arrow_up,
-                            tooltip: '上一条消息',
-                            onTap: _jumpToPrevUserMessage,
-                          ),
-                          const SizedBox(width: 8),
-                          _quickJumpBtn(
-                            icon: Icons.keyboard_double_arrow_down,
-                            tooltip: '回到底部',
-                            onTap: () {
-                              if (!_chatScroll.hasClients) return;
-                              _chatScroll.jumpTo(
-                                _chatScroll.position.maxScrollExtent,
-                              );
-                            },
-                          ),
-                        ],
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -6661,30 +6711,35 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
-  /// 快捷导航圆钮：灰玻璃质感（与工具卡同色系），44px
-  Widget _quickJumpBtn({
+  /// 快捷导航玻璃圆钮：与输入栏 _roundButton 同风格（液态玻璃 + 灰 tint）
+  Widget _glassNavBtn({
     required IconData icon,
     required String tooltip,
     required VoidCallback onTap,
   }) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
     return Tooltip(
       message: tooltip,
-      child: Material(
-        color: dark
-            ? const Color(0xCC262626)
-            : const Color(0xCCF2F2F2),
+      child: CupertinoLiquidGlass(
+        blurSigma: 5,
+        tintOpacity: Theme.of(context).brightness == Brightness.dark
+            ? 0.20
+            : 0.35,
         borderRadius: BorderRadius.circular(22),
-        child: InkWell(
+        glowRadius: 6,
+        child: Material(
+          color: Colors.transparent,
           borderRadius: BorderRadius.circular(22),
-          onTap: onTap,
-          child: SizedBox(
-            width: 44,
-            height: 44,
-            child: Icon(
-              icon,
-              size: 22,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(22),
+            onTap: onTap,
+            child: SizedBox(
+              width: 44,
+              height: 44,
+              child: Icon(
+                icon,
+                size: 22,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
         ),
