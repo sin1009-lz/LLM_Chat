@@ -768,8 +768,71 @@ class _HomePageState extends State<HomePage>
 
   /// 滚动通知：跟踪用户手指拖动（当前无抢滚动逻辑，保留供调试）
 
+  /// 上滑快捷导航（ChatBox 式）：离开底部时浮现「回到顶部/上一条
+  /// 消息/回到底部」。ValueNotifier 驱动独立子树，滚动帧不重建主页
+  final ValueNotifier<bool> _awayFromBottom = ValueNotifier(false);
+
   bool _onScrollNotification(ScrollNotification n) {
+    if (n.depth == 0 &&
+        (n is ScrollUpdateNotification || n is ScrollEndNotification)) {
+      // 滞回：远离底部 >320px 显示；贴回底部 <60px 隐藏
+      final ext = n.metrics.extentAfter;
+      final away = _awayFromBottom.value;
+      if (!away && ext > 320) {
+        _awayFromBottom.value = true;
+      } else if (away && ext < 60) {
+        _awayFromBottom.value = false;
+      }
+    }
     return false;
+  }
+
+  /// 当前可视位置最近的问题（用户消息索引）；-1 = 在第一个问题之前
+  int _currentUserMsgIndex() {
+    if (!_chatScroll.hasClients) return -1;
+    final msgs = _currentConversation?.messages;
+    if (msgs == null || msgs.isEmpty) return -1;
+    final pos = _chatScroll.position;
+    final f = (pos.pixels / math.max(1.0, pos.maxScrollExtent)).clamp(
+      0.0,
+      1.0,
+    );
+    final est = (f * (msgs.length - 1)).round().clamp(0, msgs.length - 1);
+    var cur = -1;
+    for (var i = 0; i < msgs.length; i++) {
+      if (msgs[i].role != Role.user) continue;
+      if (i <= est) {
+        cur = i;
+      } else {
+        break;
+      }
+    }
+    return cur;
+  }
+
+  /// 跳到上一条用户消息（没有更早的 → 顶部）
+  void _jumpToPrevUserMessage() {
+    final msgs = _currentConversation?.messages;
+    if (msgs == null || msgs.isEmpty || !_chatScroll.hasClients) return;
+    final cur = _currentUserMsgIndex();
+    var target = -1;
+    for (var i = (cur < 0 ? msgs.length - 1 : cur - 1); i >= 0; i--) {
+      if (msgs[i].role == Role.user) {
+        target = i;
+        break;
+      }
+    }
+    if (target < 0) {
+      _chatScroll.jumpTo(0);
+      return;
+    }
+    final f = target / math.max(1, msgs.length - 1);
+    _chatScroll.jumpTo(
+      (f * _chatScroll.position.maxScrollExtent).clamp(
+        0.0,
+        _chatScroll.position.maxScrollExtent,
+      ),
+    );
   }
 
 
@@ -4734,6 +4797,7 @@ class _HomePageState extends State<HomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _streamTick.dispose();
+    _awayFromBottom.dispose();
     _inputBarAnimatedTop.dispose();
     _tts?.stop();
     _streamSub?.cancel();
@@ -4976,6 +5040,63 @@ class _HomePageState extends State<HomePage>
             hasAttachments: _attachments.isNotEmpty,
             attachmentsAllLoading:
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
+          ),
+        ),
+        // ── 上滑快捷导航（ChatBox 式）：离开底部浮现 ──
+        // 回到顶部 / 上一条消息 / 回到底部；贴回底部隐去。
+        // 底部跟随输入栏（含键盘/多行增高，_inputBarTop 实时）
+        Positioned(
+          right: 14,
+          bottom: keyboardInset + 8,
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _awayFromBottom,
+            builder: (context, away, _) => ValueListenableBuilder<double>(
+              valueListenable: _inputBarTop,
+              builder: (context, inputTop, _) => Padding(
+                padding: EdgeInsets.only(bottom: inputTop),
+                child: AnimatedScale(
+                  scale: away ? 1.0 : 0.5,
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOutCubic,
+                  child: AnimatedOpacity(
+                    opacity: away ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 160),
+                    child: IgnorePointer(
+                      ignoring: !away,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _quickJumpBtn(
+                            icon: Icons.vertical_align_top,
+                            tooltip: '回到顶部',
+                            onTap: () => _chatScroll.hasClients
+                                ? _chatScroll.jumpTo(0)
+                                : null,
+                          ),
+                          const SizedBox(width: 8),
+                          _quickJumpBtn(
+                            icon: Icons.keyboard_double_arrow_up,
+                            tooltip: '上一条消息',
+                            onTap: _jumpToPrevUserMessage,
+                          ),
+                          const SizedBox(width: 8),
+                          _quickJumpBtn(
+                            icon: Icons.keyboard_double_arrow_down,
+                            tooltip: '回到底部',
+                            onTap: () {
+                              if (!_chatScroll.hasClients) return;
+                              _chatScroll.jumpTo(
+                                _chatScroll.position.maxScrollExtent,
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
         // ── Python 内核宿主：2×2 像素 WebView 负坐标移出视口 ──
@@ -6540,6 +6661,37 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
+  /// 快捷导航圆钮：灰玻璃质感（与工具卡同色系），44px
+  Widget _quickJumpBtn({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+  }) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: dark
+            ? const Color(0xCC262626)
+            : const Color(0xCCF2F2F2),
+        borderRadius: BorderRadius.circular(22),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: onTap,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Icon(
+              icon,
+              size: 22,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// 该消息是否为「已收纳轮次组的非首成员」（渲染为空 + 外边距归零；
   /// 卡片由组首渲染）。[index] 由调用方传入（消息项自带），免 O(n) 扫描
   bool isCollapsedToolMember(Message m, int index) {
