@@ -8537,10 +8537,10 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                   ],
           ),
           blurSigma: 10, // 更模糊一点
-          // tint 透明度：亮色 0.28、暗色 0.20（暗色 tint 为深灰，加浓
-          // 让玻璃面更暗——此前 0.12 偏白）
+          // tint 透明度：亮色 0.28、暗色 0.42（暗色 tint 为深灰
+          // 1C1C1E，继续加浓压暗玻璃面——用户反馈仍偏亮）
           tintOpacity: Theme.of(context).brightness == Brightness.dark
-              ? 0.20
+              ? 0.42
               : 0.28,
           borderRadius: BorderRadius.circular(_radius),
           glowRadius: 10,
@@ -8549,7 +8549,7 @@ class _GlassInputBarState extends State<_GlassInputBar> {
               ? const LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
-                  colors: [Color(0x33FFFFFF), Color(0x11FFFFFF), Color(0x00FFFFFF)],
+                  colors: [Color(0x14FFFFFF), Color(0x08FFFFFF), Color(0x00FFFFFF)],
                 )
               : const LinearGradient(
                   begin: Alignment.topLeft,
