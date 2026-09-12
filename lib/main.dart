@@ -6822,47 +6822,29 @@ class _HomePageState extends State<HomePage>
   /// MCP 工具调用分割块（Claude 风格）：独立于消息气泡的灰底卡片，
   /// 位于工具调用轮气泡之后、下一轮气泡之前，作为 ReAct 轮次的分割元素。
   /// 顶部标签行（「工具调用」+ 状态汇总），每个工具一行（名称 + 参数 + 状态）
-  /// 快捷导航玻璃圆钮：与输入栏 _roundButton 同风格（液态玻璃 + 灰 tint）
+  /// 快捷导航圆钮：普通灰底（无 BackdropFilter——滚动中三枚玻璃钮
+  /// 的背景采样是持续掉帧主因；视觉保持灰底圆钮 + 图标）
   Widget _glassNavBtn({
     required IconData icon,
     required String tooltip,
     required VoidCallback onTap,
   }) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
     return Tooltip(
       message: tooltip,
-      child: CupertinoLiquidGlass(
-        // 基于 .dark()/.light() 预设（直接传默认构造 = 白 tint）
-        theme: (Theme.of(context).brightness == Brightness.dark
-                ? LiquidGlassThemeData.dark()
-                : LiquidGlassThemeData.light())
-            .copyWith(
-              shadows: Theme.of(context).brightness == Brightness.dark
-                  ? const <BoxShadow>[]
-                  : null,
-            ),
-        blurSigma: 5,
-        tintOpacity: Theme.of(context).brightness == Brightness.dark
-            ? 0.55
-            : 0.35,
+      child: Material(
+        color: dark ? const Color(0xE61E1E20) : const Color(0xE6F2F2F2),
         borderRadius: BorderRadius.circular(22),
-        // 暗色模式去光影（灰底上发光边像脏阴影）
-        glowRadius: Theme.of(context).brightness == Brightness.dark
-            ? 0
-            : 6,
-        child: Material(
-          color: Colors.transparent,
+        child: InkWell(
           borderRadius: BorderRadius.circular(22),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(22),
-            onTap: onTap,
-            child: SizedBox(
-              width: 44,
-              height: 44,
-              child: Icon(
-                icon,
-                size: 22,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+          onTap: onTap,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Icon(
+              icon,
+              size: 22,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
         ),
