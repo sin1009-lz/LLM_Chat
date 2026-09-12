@@ -5078,7 +5078,7 @@ class _HomePageState extends State<HomePage>
           child: ValueListenableBuilder<double>(
             valueListenable: _inputBarAnimatedTop,
             builder: (context, inputTop, _) => Padding(
-              padding: EdgeInsets.only(bottom: inputTop + 56),
+              padding: EdgeInsets.only(bottom: inputTop + 24),
               child: ValueListenableBuilder<bool>(
                 valueListenable: _fastNavVisible,
                 builder: (context, fast, _) => ValueListenableBuilder<bool>(
@@ -5098,48 +5098,42 @@ class _HomePageState extends State<HomePage>
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               // 回到顶部 / 上一条：快速上滑浮现、
-                              // 定时消失——进出均带淡入淡出 + 纵向展开
-                              // 收拢动画（SizeTransition 自底向上生长）
-                              AnimatedSwitcher(
-                                duration: const Duration(
-                                  milliseconds: 200,
-                                ),
-                                switchInCurve: Curves.easeOutCubic,
-                                switchOutCurve: Curves.easeInCubic,
-                                transitionBuilder: (child, anim) =>
-                                    FadeTransition(
-                                      opacity: anim,
-                                      child: SizeTransition(
-                                        sizeFactor: anim,
-                                        axisAlignment: 1.0,
-                                        child: child,
-                                      ),
+                              // 定时消失——常驻子树 + heightFactor 与
+                              // 透明度双补间（0↔1），进出都平滑
+                              // （自底向上展开/收拢 + 淡入淡出）
+                              TweenAnimationBuilder<double>(
+                                tween: Tween(end: showFast ? 1.0 : 0.0),
+                                duration: const Duration(milliseconds: 200),
+                                curve: Curves.easeOutCubic,
+                                builder: (context, t, child) => Opacity(
+                                  opacity: t,
+                                  child: ClipRect(
+                                    child: Align(
+                                      heightFactor: t,
+                                      alignment: Alignment.bottomCenter,
+                                      child: child,
                                     ),
-                                child: showFast
-                                    ? Column(
-                                        key: const ValueKey('fastNav'),
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          _glassNavBtn(
-                                            icon: Icons.vertical_align_top,
-                                            tooltip: '回到顶部',
-                                            onTap: () => _chatScroll.hasClients
-                                                ? _chatScroll.jumpTo(0)
-                                                : null,
-                                          ),
-                                          const SizedBox(height: 10),
-                                          _glassNavBtn(
-                                            icon:
-                                                Icons.keyboard_double_arrow_up,
-                                            tooltip: '上一条消息',
-                                            onTap: _jumpToPrevUserMessage,
-                                          ),
-                                          const SizedBox(height: 10),
-                                        ],
-                                      )
-                                    : const SizedBox.shrink(
-                                        key: ValueKey('fastNavOff'),
-                                      ),
+                                  ),
+                                ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _glassNavBtn(
+                                      icon: Icons.vertical_align_top,
+                                      tooltip: '回到顶部',
+                                      onTap: () => _chatScroll.hasClients
+                                          ? _chatScroll.jumpTo(0)
+                                          : null,
+                                    ),
+                                    const SizedBox(height: 10),
+                                    _glassNavBtn(
+                                      icon: Icons.keyboard_double_arrow_up,
+                                      tooltip: '上一条消息',
+                                      onTap: _jumpToPrevUserMessage,
+                                    ),
+                                    const SizedBox(height: 10),
+                                  ],
+                                ),
                               ),
                               // 回到底部：离开底部持续显示
                               _glassNavBtn(
