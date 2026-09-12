@@ -5098,19 +5098,20 @@ class _HomePageState extends State<HomePage>
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               // 回到顶部 / 上一条：快速上滑浮现、
-                              // 定时消失——常驻子树 + heightFactor 与
-                              // 透明度双补间（0↔1），进出都平滑
-                              // （自底向上展开/收拢 + 淡入淡出）
+                              // 定时消失——滑入/滑出 + 淡入淡出。
+                              // 不用 heightFactor 裁切（半截玻璃的
+                              // BackdropFilter 边界 = 底部奇怪阴影）
                               TweenAnimationBuilder<double>(
                                 tween: Tween(end: showFast ? 1.0 : 0.0),
                                 duration: const Duration(milliseconds: 200),
                                 curve: Curves.easeOutCubic,
-                                builder: (context, t, child) => Opacity(
-                                  opacity: t,
-                                  child: ClipRect(
-                                    child: Align(
-                                      heightFactor: t,
-                                      alignment: Alignment.bottomCenter,
+                                builder: (context, t, child) => IgnorePointer(
+                                  ignoring: t < 0.5,
+                                  child: Opacity(
+                                    opacity: t,
+                                    child: Transform.translate(
+                                      // 自下方向上滑入（从回到底部后面升起）
+                                      offset: Offset(0, (1 - t) * 120),
                                       child: child,
                                     ),
                                   ),
