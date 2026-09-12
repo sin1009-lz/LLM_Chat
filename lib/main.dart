@@ -803,6 +803,10 @@ class _HomePageState extends State<HomePage>
           _fastNavTimer = Timer(const Duration(milliseconds: 2200), () {
             _fastNavVisible.value = false;
           });
+        } else if (n.metrics.pixels <= 60 && _fastNavVisible.value) {
+          // 已到顶部：向上箭头失去意义，立即隐藏
+          _fastNavTimer?.cancel();
+          _fastNavVisible.value = false;
         }
       }
       _qnLastPixels = n.metrics.pixels;
@@ -5098,43 +5102,62 @@ class _HomePageState extends State<HomePage>
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               // 回到顶部 / 上一条：快速上滑浮现、
-                              // 定时消失——滑入/滑出 + 淡入淡出。
-                              // 不用 heightFactor 裁切（半截玻璃的
-                              // BackdropFilter 边界 = 底部奇怪阴影）
+                              // 定时消失——FAB 菜单式交错缩放：以各自
+                              // 底部中心为原点缩放 + 淡入，下一条先出、
+                              // 回到顶部跟上（消失反向），不裁切玻璃
                               TweenAnimationBuilder<double>(
                                 tween: Tween(end: showFast ? 1.0 : 0.0),
-                                duration: const Duration(milliseconds: 200),
+                                duration: const Duration(milliseconds: 220),
                                 curve: Curves.easeOutCubic,
-                                builder: (context, t, child) => IgnorePointer(
-                                  ignoring: t < 0.5,
-                                  child: Opacity(
-                                    opacity: t,
-                                    child: Transform.translate(
-                                      // 自下方向上滑入（从回到底部后面升起）
-                                      offset: Offset(0, (1 - t) * 120),
-                                      child: child,
+                                builder: (context, t, _) {
+                                  Widget staggered(
+                                    double a,
+                                    IconData icon,
+                                    String tooltip,
+                                    VoidCallback onTap,
+                                  ) {
+                                    final v = a.clamp(0.0, 1.0);
+                                    return Opacity(
+                                      opacity: v,
+                                      child: Transform.scale(
+                                        scale: 0.4 + 0.6 * v,
+                                        alignment: Alignment.bottomCenter,
+                                        child: _glassNavBtn(
+                                          icon: icon,
+                                          tooltip: tooltip,
+                                          onTap: onTap,
+                                        ),
+                                      ),
+                                    );
+                                  }
+
+                                  return IgnorePointer(
+                                    ignoring: t < 0.5,
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        // 回到顶部（上方，稍后出现）
+                                        staggered(
+                                          (t - 0.18) * 1.6,
+                                          Icons.vertical_align_top,
+                                          '回到顶部',
+                                          () => _chatScroll.hasClients
+                                              ? _chatScroll.jumpTo(0)
+                                              : null,
+                                        ),
+                                        const SizedBox(height: 10),
+                                        // 上一条消息（下方，先出现）
+                                        staggered(
+                                          t * 1.6,
+                                          Icons.keyboard_double_arrow_up,
+                                          '上一条消息',
+                                          _jumpToPrevUserMessage,
+                                        ),
+                                        const SizedBox(height: 10),
+                                      ],
                                     ),
-                                  ),
-                                ),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    _glassNavBtn(
-                                      icon: Icons.vertical_align_top,
-                                      tooltip: '回到顶部',
-                                      onTap: () => _chatScroll.hasClients
-                                          ? _chatScroll.jumpTo(0)
-                                          : null,
-                                    ),
-                                    const SizedBox(height: 10),
-                                    _glassNavBtn(
-                                      icon: Icons.keyboard_double_arrow_up,
-                                      tooltip: '上一条消息',
-                                      onTap: _jumpToPrevUserMessage,
-                                    ),
-                                    const SizedBox(height: 10),
-                                  ],
-                                ),
+                                  );
+                                },
                               ),
                               // 回到底部：离开底部持续显示
                               _glassNavBtn(
@@ -6734,7 +6757,10 @@ class _HomePageState extends State<HomePage>
             ? 0.20
             : 0.35,
         borderRadius: BorderRadius.circular(22),
-        glowRadius: 6,
+        // 暗色模式去光影（灰底上发光边像脏阴影）
+        glowRadius: Theme.of(context).brightness == Brightness.dark
+            ? 0
+            : 6,
         child: Material(
           color: Colors.transparent,
           borderRadius: BorderRadius.circular(22),
