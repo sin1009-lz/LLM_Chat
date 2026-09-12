@@ -8536,18 +8536,25 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                   ],
           ),
           blurSigma: 10, // 更模糊一点
-          // tint 透明度：亮色 0.28（默认）、暗色 0.12——保持玻璃半透明，
-          // 过高（0.6）会变成白色实色
+          // tint 透明度：亮色 0.28、暗色 0.20（暗色 tint 为深灰，加浓
+          // 让玻璃面更暗——此前 0.12 偏白）
           tintOpacity: Theme.of(context).brightness == Brightness.dark
-              ? 0.12
+              ? 0.20
               : 0.28,
           borderRadius: BorderRadius.circular(_radius),
           glowRadius: 10,
-          specularGradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xCCFFFFFF), Color(0x66FFFFFF), Color(0x00FFFFFF)],
-          ),
+          // 高光斜面：暗色大幅减弱（白色 80% 高光在深底上 = 发白）
+          specularGradient: Theme.of(context).brightness == Brightness.dark
+              ? const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0x33FFFFFF), Color(0x11FFFFFF), Color(0x00FFFFFF)],
+                )
+              : const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xCCFFFFFF), Color(0x66FFFFFF), Color(0x00FFFFFF)],
+                ),
           child: Stack(
             children: [
               // 白色模式下玻璃面偏灰一档：默认白色 tint 在浅色背景上
