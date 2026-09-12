@@ -4097,11 +4097,17 @@ class _HomePageState extends State<HomePage>
   /// 逐张全尺寸解码（选大量图期间白屏的根源）。原图直接交给
   /// _compressAndAddImages 的 isolate 管道逐张压缩落盘
   Future<void> _pickImages() async {
-    final picked = await ImagePicker().pickMultiImage();
-    if (!mounted) return;
-    Navigator.of(context).pop(); // 先关面板（压缩后台逐张进行）
-    if (picked.isNotEmpty) {
-      await _compressAndAddImages(picked.map((f) => f.path).toList());
+    try {
+      final picked = await ImagePicker().pickMultiImage();
+      if (!mounted) return;
+      Navigator.of(context).pop(); // 先关面板（压缩后台逐张进行）
+      if (picked.isNotEmpty) {
+        await _compressAndAddImages(picked.map((f) => f.path).toList());
+      }
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      _toast('选图失败：$e');
     }
   }
 
@@ -4114,11 +4120,17 @@ class _HomePageState extends State<HomePage>
 
   /// 拍照（相机）：拍一张作为图片附件（与图片入口同链路同规格）
   Future<void> _takePhoto() async {
-    final shot = await ImagePicker().pickImage(source: ImageSource.camera);
-    if (!mounted) return;
-    Navigator.of(context).pop(); // 关面板后后台落盘
-    if (shot != null) {
-      await _compressAndAddImages([shot.path]);
+    try {
+      final shot = await ImagePicker().pickImage(source: ImageSource.camera);
+      if (!mounted) return;
+      Navigator.of(context).pop(); // 关面板后后台落盘
+      if (shot != null) {
+        await _compressAndAddImages([shot.path]);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      _toast('拍照失败：$e');
     }
   }
 

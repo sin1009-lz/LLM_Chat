@@ -1,8 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 网络请求：测试连接 / 从 API 获取模型 -->
     <uses-permission android:name="android.permission.INTERNET"/>
-    <!-- 拍照（加号面板相机） -->
-    <uses-permission android:name="android.permission.CAMERA"/>
     <!-- 后台接收回复：前台服务（生成期间保活，防系统冻结断流） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
