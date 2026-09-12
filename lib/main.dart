@@ -5078,7 +5078,7 @@ class _HomePageState extends State<HomePage>
           child: ValueListenableBuilder<double>(
             valueListenable: _inputBarAnimatedTop,
             builder: (context, inputTop, _) => Padding(
-              padding: EdgeInsets.only(bottom: inputTop + 10),
+              padding: EdgeInsets.only(bottom: inputTop + 56),
               child: ValueListenableBuilder<bool>(
                 valueListenable: _fastNavVisible,
                 builder: (context, fast, _) => ValueListenableBuilder<bool>(
@@ -5097,15 +5097,27 @@ class _HomePageState extends State<HomePage>
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              // 回到顶部 / 上一条：快速上滑时淡入
-                              AnimatedSize(
+                              // 回到顶部 / 上一条：快速上滑浮现、
+                              // 定时消失——进出均带淡入淡出 + 纵向展开
+                              // 收拢动画（SizeTransition 自底向上生长）
+                              AnimatedSwitcher(
                                 duration: const Duration(
-                                  milliseconds: 180,
+                                  milliseconds: 200,
                                 ),
-                                curve: Curves.easeOutCubic,
-                                alignment: Alignment.bottomCenter,
+                                switchInCurve: Curves.easeOutCubic,
+                                switchOutCurve: Curves.easeInCubic,
+                                transitionBuilder: (child, anim) =>
+                                    FadeTransition(
+                                      opacity: anim,
+                                      child: SizeTransition(
+                                        sizeFactor: anim,
+                                        axisAlignment: 1.0,
+                                        child: child,
+                                      ),
+                                    ),
                                 child: showFast
                                     ? Column(
+                                        key: const ValueKey('fastNav'),
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           _glassNavBtn(
@@ -5125,7 +5137,9 @@ class _HomePageState extends State<HomePage>
                                           const SizedBox(height: 10),
                                         ],
                                       )
-                                    : const SizedBox.shrink(),
+                                    : const SizedBox.shrink(
+                                        key: ValueKey('fastNavOff'),
+                                      ),
                               ),
                               // 回到底部：离开底部持续显示
                               _glassNavBtn(
