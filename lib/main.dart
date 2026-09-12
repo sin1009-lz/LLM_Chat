@@ -815,6 +815,17 @@ class _HomePageState extends State<HomePage>
     return false;
   }
 
+  /// 动画滚动到指定偏移（回到顶部/底部/上一条都用，420ms easeOutCubic）
+  void _animatedJumpTo(double offset) {
+    if (!_chatScroll.hasClients) return;
+    final pos = _chatScroll.position;
+    _chatScroll.animateTo(
+      offset.clamp(pos.minScrollExtent, pos.maxScrollExtent),
+      duration: const Duration(milliseconds: 420),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
   /// 当前可视位置最近的问题（用户消息索引）；-1 = 在第一个问题之前
   int _currentUserMsgIndex() {
     if (!_chatScroll.hasClients) return -1;
@@ -851,16 +862,11 @@ class _HomePageState extends State<HomePage>
       }
     }
     if (target < 0) {
-      _chatScroll.jumpTo(0);
+      _animatedJumpTo(0);
       return;
     }
     final f = target / math.max(1, msgs.length - 1);
-    _chatScroll.jumpTo(
-      (f * _chatScroll.position.maxScrollExtent).clamp(
-        0.0,
-        _chatScroll.position.maxScrollExtent,
-      ),
-    );
+    _animatedJumpTo(f * _chatScroll.position.maxScrollExtent);
   }
 
 
@@ -5141,9 +5147,7 @@ class _HomePageState extends State<HomePage>
                                           (t - 0.18) * 1.6,
                                           Icons.vertical_align_top,
                                           '回到顶部',
-                                          () => _chatScroll.hasClients
-                                              ? _chatScroll.jumpTo(0)
-                                              : null,
+                                          () => _animatedJumpTo(0),
                                         ),
                                         const SizedBox(height: 10),
                                         // 上一条消息（下方，先出现）
@@ -5164,11 +5168,9 @@ class _HomePageState extends State<HomePage>
                                 icon: Icons.keyboard_double_arrow_down,
                                 tooltip: '回到底部',
                                 onTap: () {
-                                  if (!_chatScroll.hasClients) return;
-                                  _chatScroll.jumpTo(
-                                    _chatScroll.position.maxScrollExtent,
-                                  );
-                                },
+  if (!_chatScroll.hasClients) return;
+  _animatedJumpTo(_chatScroll.position.maxScrollExtent);
+},
                               ),
                             ],
                           ),
