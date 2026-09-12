@@ -773,6 +773,10 @@ class _HomePageState extends State<HomePage>
   /// · 回到顶部/上一条消息：仅【快速上滑】（>1.2px/ms 向上）时浮现，
   ///   2.2s 静止自动隐去
   final ValueNotifier<bool> _awayFromBottom = ValueNotifier(false);
+
+  /// 用户消息的布局锚点（GlobalKey，惰性创建）：上一条消息跳转的
+  /// 真实位置精修用——纯比例估算在消息高度不均时偏差大（会跳到顶）
+  final Map<Message, GlobalKey> _userMsgKeys = {};
   final ValueNotifier<bool> _fastNavVisible = ValueNotifier(false);
   Timer? _fastNavTimer;
   double _qnLastPixels = 0;
@@ -865,8 +869,29 @@ class _HomePageState extends State<HomePage>
       _animatedJumpTo(0);
       return;
     }
+    final m = msgs[target];
+    // 一阶段：比例估算拉近（把目标带进构建范围）
     final f = target / math.max(1, msgs.length - 1);
-    _animatedJumpTo(f * _chatScroll.position.maxScrollExtent);
+    _chatScroll.jumpTo(
+      (f * _chatScroll.position.maxScrollExtent).clamp(
+        _chatScroll.position.minScrollExtent,
+        _chatScroll.position.maxScrollExtent,
+      ),
+    );
+    // 二阶段：下一帧目标已构建 → 用真实布局位置精修（ensureVisible
+    // 平滑滚到，问题停在视口 15% 处）；估算偏差大时以此为准
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final ctx = _userMsgKeys[m]?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+          alignment: 0.15,
+        );
+      }
+    });
   }
 
 
@@ -4927,6 +4952,9 @@ class _HomePageState extends State<HomePage>
                 // Flutter 按参数相等跳过其子树 rebuild（此前每次 setState
                 // 全列表所有气泡都重新 build，是流式滚动卡顿的大头）
                 return _MessageItem(
+                  key: m.role == Role.user
+                      ? (_userMsgKeys.putIfAbsent(m, () => GlobalKey()))
+                      : null,
                   message: m,
                   index: msgIndex,
                   editing: identical(_editingMsg, m),
@@ -5078,10 +5106,11 @@ class _HomePageState extends State<HomePage>
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
           ),
         ),
-        // ── 上滑快捷导航（ChatBox 式，竖排）──
+        // ── 上滑快捷导航（ChatBox 式，竖排；通用设置可关）──
         // 回到底部：离开底部持续显示；回到顶部/上一条：快速上滑
         // 才浮现（2.2s 隐去）。底部实时跟随输入栏真实高度
         //（_inputBarAnimatedTop = SizeReporter 逐帧上报，防干涉）
+        if (_general.quickNavEnabled)
         Positioned(
           right: 12,
           bottom: keyboardInset,
@@ -8480,17 +8509,19 @@ class _GlassInputBarState extends State<_GlassInputBar> {
           left: _hMargin,
           right: _hMargin,
         ),
-        // 输入栏容器（外层柔影：悬浮感）
+        // 输入栏容器（外层柔影：悬浮感；暗色模式去阴影）
         child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(_radius),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.16),
-                blurRadius: 18,
-                offset: const Offset(0, 6),
-              ),
-            ],
+            boxShadow: Theme.of(context).brightness == Brightness.dark
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.16),
+                      blurRadius: 18,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
           ),
           child: CupertinoLiquidGlass(
           blurSigma: 10, // 更模糊一点
@@ -9470,6 +9501,7 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
 /// 正在流式的那条消息 content 在变，但 Flutter 只 rebuild 它一个
 class _MessageItem extends StatefulWidget {
   const _MessageItem({
+    super.key,
     required this.message,
     required this.index,
     this.editing = false,

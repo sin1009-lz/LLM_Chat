@@ -32,6 +32,7 @@ class GeneralSettings {
   const GeneralSettings({
     required this.pasteLongTextAsFile,
     required this.pasteThreshold,
+    required this.quickNavEnabled,
     required this.titleStrategy,
     required this.aiTitleModel,
     required this.aiTitlePrompt,
@@ -62,6 +63,7 @@ class GeneralSettings {
   /// 默认值（集中一处：新增字段时同步更新 fromJson 回退逻辑）
   static const defaults = GeneralSettings(
     pasteLongTextAsFile: true,
+    quickNavEnabled: true,
     pasteThreshold: 2000,
     titleStrategy: TitleStrategy.ai,
     aiTitleModel: '',
@@ -101,6 +103,9 @@ class GeneralSettings {
 
   /// 触发阈值（字符数）
   final int pasteThreshold;
+
+  /// 上滑快捷导航（回到顶部/上一条消息/回到底部）开关
+  final bool quickNavEnabled;
 
   /// 对话标题策略
   final TitleStrategy titleStrategy;
@@ -206,10 +211,12 @@ class GeneralSettings {
     bool? builtinPythonEnabled,
     bool? pdfAsImage,
     bool? contextPercent,
+    bool? quickNavEnabled,
     int? reactMaxRounds,
   }) => GeneralSettings(
     pasteLongTextAsFile: pasteLongTextAsFile ?? this.pasteLongTextAsFile,
     pasteThreshold: pasteThreshold ?? this.pasteThreshold,
+    quickNavEnabled: quickNavEnabled ?? this.quickNavEnabled,
     titleStrategy: titleStrategy ?? this.titleStrategy,
     aiTitleModel: aiTitleModel ?? this.aiTitleModel,
     aiTitlePrompt: aiTitlePrompt ?? this.aiTitlePrompt,
@@ -241,6 +248,7 @@ class GeneralSettings {
   Map<String, dynamic> toJson() => {
     'pasteLongTextAsFile': pasteLongTextAsFile,
     'pasteThreshold': pasteThreshold,
+    'quickNavEnabled': quickNavEnabled,
     'titleStrategy': titleStrategy.toJson(),
     'aiTitleModel': aiTitleModel,
     'aiTitlePrompt': aiTitlePrompt,
@@ -276,6 +284,7 @@ class GeneralSettings {
           j['pasteLongTextAsFile'] as bool? ?? d.pasteLongTextAsFile,
       pasteThreshold:
           (j['pasteThreshold'] as num?)?.toInt() ?? d.pasteThreshold,
+      quickNavEnabled: j['quickNavEnabled'] as bool? ?? d.quickNavEnabled,
       titleStrategy: TitleStrategy.fromJson(
         j['titleStrategy'] as String? ?? '',
       ),

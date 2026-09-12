@@ -3491,6 +3491,18 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
               ],
               const SizedBox(height: 12),
 
+              // ── 交互 ──
+              _switchTile(
+                context,
+                icon: Icons.keyboard_double_arrow_down,
+                title: '上滑快捷导航',
+                subtitle: '滚动离开底部时显示 回到顶部 / 上一条消息 / 回到底部',
+                value: _s.quickNavEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(quickNavEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+
               // ── 渲染 ──
               _sectionLabel('渲染'),
               _switchTile(
