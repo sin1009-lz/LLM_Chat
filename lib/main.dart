@@ -8520,18 +8520,19 @@ class _GlassInputBarState extends State<_GlassInputBar> {
           theme: LiquidGlassThemeData(
             shadows: Theme.of(context).brightness == Brightness.dark
                 ? const <BoxShadow>[
-                    // 暗色：一层柔和阴影（深底上稍高不透明度才可见）
+                    // 暗色：收窄加深（blur 16→9、33%→45%）——
+                    // 柔边太散太浅 = 输入栏与背景区分度差
                     BoxShadow(
-                      color: Color(0x42000000),
-                      blurRadius: 16,
-                      offset: Offset(0, 5),
+                      color: Color(0x73000000),
+                      blurRadius: 9,
+                      offset: Offset(0, 4),
                     ),
                   ]
                 : const <BoxShadow>[
                     BoxShadow(
-                      color: Color(0x26000000),
-                      blurRadius: 20,
-                      offset: Offset(0, 6),
+                      color: Color(0x38000000),
+                      blurRadius: 12,
+                      offset: Offset(0, 5),
                     ),
                   ],
           ),
