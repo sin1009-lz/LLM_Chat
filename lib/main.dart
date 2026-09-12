@@ -5117,7 +5117,7 @@ class _HomePageState extends State<HomePage>
           child: ValueListenableBuilder<double>(
             valueListenable: _inputBarAnimatedTop,
             builder: (context, inputTop, _) => Padding(
-              padding: EdgeInsets.only(bottom: inputTop + 24),
+              padding: EdgeInsets.only(bottom: inputTop + 40),
               child: ValueListenableBuilder<bool>(
                 valueListenable: _fastNavVisible,
                 builder: (context, fast, _) => ValueListenableBuilder<bool>(
