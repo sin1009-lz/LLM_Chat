@@ -6783,14 +6783,18 @@ class _HomePageState extends State<HomePage>
     return Tooltip(
       message: tooltip,
       child: CupertinoLiquidGlass(
-        theme: LiquidGlassThemeData(
-          shadows: Theme.of(context).brightness == Brightness.dark
-              ? const <BoxShadow>[]
-              : null,
-        ),
+        // 基于 .dark()/.light() 预设（直接传默认构造 = 白 tint）
+        theme: (Theme.of(context).brightness == Brightness.dark
+                ? LiquidGlassThemeData.dark()
+                : LiquidGlassThemeData.light())
+            .copyWith(
+              shadows: Theme.of(context).brightness == Brightness.dark
+                  ? const <BoxShadow>[]
+                  : null,
+            ),
         blurSigma: 5,
         tintOpacity: Theme.of(context).brightness == Brightness.dark
-            ? 0.20
+            ? 0.55
             : 0.35,
         borderRadius: BorderRadius.circular(22),
         // 暗色模式去光影（灰底上发光边像脏阴影）
@@ -8514,43 +8518,41 @@ class _GlassInputBarState extends State<_GlassInputBar> {
           left: _hMargin,
           right: _hMargin,
         ),
-        // 输入栏容器。阴影统一走玻璃 theme（此前外层 Container 阴影
-        // 与玻璃自带阴影叠两层 = 阶梯感）：浅色单层柔影，暗色无影
+        // 输入栏容器。阴影走玻璃 theme 的 copyWith——注意必须基于
+        // .dark()/.light() 预设：直接传 LiquidGlassThemeData(...) 会把
+        // 亮度预设整个换成默认构造（白 tint）= 暗色发白的根源
         child: CupertinoLiquidGlass(
-          theme: LiquidGlassThemeData(
-            shadows: Theme.of(context).brightness == Brightness.dark
-                ? const <BoxShadow>[
-                    // 暗色：收窄加深（blur 16→9、33%→45%）——
-                    // 柔边太散太浅 = 输入栏与背景区分度差
-                    BoxShadow(
-                      color: Color(0x73000000),
-                      blurRadius: 9,
-                      offset: Offset(0, 4),
-                    ),
-                  ]
-                : const <BoxShadow>[
-                    BoxShadow(
-                      color: Color(0x38000000),
-                      blurRadius: 12,
-                      offset: Offset(0, 5),
-                    ),
-                  ],
-          ),
+          theme: (Theme.of(context).brightness == Brightness.dark
+              ? LiquidGlassThemeData.dark()
+              : LiquidGlassThemeData.light())
+              .copyWith(
+                shadows: Theme.of(context).brightness == Brightness.dark
+                    ? const <BoxShadow>[
+                        BoxShadow(
+                          color: Color(0x73000000),
+                          blurRadius: 9,
+                          offset: Offset(0, 4),
+                        ),
+                      ]
+                    : const <BoxShadow>[
+                        BoxShadow(
+                          color: Color(0x38000000),
+                          blurRadius: 12,
+                          offset: Offset(0, 5),
+                        ),
+                      ],
+              ),
           blurSigma: 10, // 更模糊一点
-          // tint 透明度：亮色 0.28、暗色 0.42（暗色 tint 为深灰
-          // 1C1C1E，继续加浓压暗玻璃面——用户反馈仍偏亮）
+          // tint：暗色预设为深灰 1C1C1E（0.55 太实，0.45 透一点
+          // 玻璃感）；亮色白 tint 0.28
           tintOpacity: Theme.of(context).brightness == Brightness.dark
-              ? 0.42
+              ? 0.45
               : 0.28,
           borderRadius: BorderRadius.circular(_radius),
           glowRadius: 10,
-          // 高光斜面：暗色大幅减弱（白色 80% 高光在深底上 = 发白）
+          // 高光斜面：亮色加强（玻璃质感）；暗色用预设自带的低强度
           specularGradient: Theme.of(context).brightness == Brightness.dark
-              ? const LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [Color(0x14FFFFFF), Color(0x08FFFFFF), Color(0x00FFFFFF)],
-                )
+              ? null
               : const LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
