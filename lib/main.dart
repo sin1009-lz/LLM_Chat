@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart' show SpringDescription, SpringSimulation;
 import 'package:flutter/rendering.dart' show RenderProxyBox;
 import 'package:flutter/services.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:just_audio/just_audio.dart';
@@ -100,8 +101,41 @@ class _SlideCoverPageTransitionsBuilder extends PageTransitionsBuilder {
 const Color kBackgroundLight = Color(0xFFF5F5F5);
 const Color kBackgroundDark = Color(0xFF161616);
 
+/// 临时性能诊断：帧耗时统计（>20ms 记卡顿），5 秒汇总输出 logcat。
+/// 定位完删
+bool _perfLogOn = true;
+int _perfFrames = 0, _perfJank = 0, _perfWorst = 0;
+int _perfLastReport = 0;
+
+void _perfInit() {
+  if (!_perfLogOn) return;
+  SchedulerBinding.instance.addTimingsCallback((timings) {
+    for (final t in timings) {
+      final ms = t.totalSpan.inMicroseconds / 1000.0;
+      _perfFrames++;
+      if (ms > 20) _perfJank++;
+      if (ms > _perfWorst) _perfWorst = ms.toInt();
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_perfLastReport == 0) _perfLastReport = now;
+    if (now - _perfLastReport >= 5000 && _perfFrames > 0) {
+      // ignore: avoid_print
+      print(
+        'PERF frames=$_perfFrames jank=$_perfJank '
+        '(${(100 * _perfJank / _perfFrames).toStringAsFixed(1)}%) '
+        'worst=${_perfWorst}ms',
+      );
+      _perfFrames = 0;
+      _perfJank = 0;
+      _perfWorst = 0;
+      _perfLastReport = now;
+    }
+  });
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  _perfInit();
   // 沉浸式：内容延伸到状态栏后面
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   // 锁定竖屏（与 AndroidManifest screenOrientation 双保险）
@@ -5126,7 +5160,8 @@ class _HomePageState extends State<HomePage>
         Positioned(
           right: 12,
           bottom: keyboardInset,
-          child: ValueListenableBuilder<double>(
+          child: RepaintBoundary(
+            child: ValueListenableBuilder<double>(
             valueListenable: _inputBarAnimatedTop,
             builder: (context, inputTop, _) => Padding(
               padding: EdgeInsets.only(bottom: inputTop + 40),
@@ -5224,6 +5259,7 @@ class _HomePageState extends State<HomePage>
             ),
           ),
         ),
+        ), // RepaintBoundary（快捷导航隔离层）
         // ── Python 内核宿主：2×2 像素 WebView 负坐标移出视口 ──
         // WebView 必须挂树才会加载执行；零尺寸会挂起，故用最小尺寸 +
         // 移出可见区（不吃光栅资源，见启动 OOM 教训）
