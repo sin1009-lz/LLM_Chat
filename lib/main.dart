@@ -11,6 +11,7 @@ import 'package:cupertino_liquid_glass/cupertino_liquid_glass.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart' show SpringDescription, SpringSimulation;
 import 'package:flutter/rendering.dart' show RenderProxyBox;
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -4640,7 +4641,7 @@ class _HomePageState extends State<HomePage>
   ///    期间页面保持旧会话内容，无空页转圈等待
   Future<void> _openConversation(Conversation c) async {
     _stopSpeaking();
-    _drawerController.animateTo(0, curve: Curves.easeOutQuart);
+    _springDrawerTo(0.0);
     if (c.loaded) {
       // 已物化：无重负载，直接切换
       setState(() {
@@ -4923,10 +4924,7 @@ class _HomePageState extends State<HomePage>
             builder: (context, _) => _drawerController.value > 0.95
                 ? GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => _drawerController.animateTo(
-                      0,
-                      curve: Curves.easeOutQuart,
-                    ),
+                    onTap: () => _springDrawerTo(0.0),
                     // 空白：仅用作命中区域，不绘制任何内容
                     child: const ColoredBox(color: Color(0x00000000)),
                   )
@@ -5144,10 +5142,9 @@ class _HomePageState extends State<HomePage>
                         offset.dx.abs().clamp(1.0, double.infinity);
                     if (angleRatio > _dragAngleThreshold) return;
                   }
-                  // 拖动系数放大：更跟手
+                  // 1:1 跟手（此前 ×1.25 放大 = 拖动手感奇怪的来源）
                   _drawerController.value =
-                      (_drawerController.value +
-                              d.delta.dx / (_drawerShift * 0.8))
+                      (_drawerController.value + d.delta.dx / _drawerShift)
                           .clamp(0.0, 1.0);
                 },
                 onHorizontalDragEnd: (d) {
@@ -5165,18 +5162,14 @@ class _HomePageState extends State<HomePage>
                     }
                   }
                   final v = d.primaryVelocity ?? 0;
-                  if (v < 0) {
-                    // 左滑退出：轻扫（速度 < -300）或滑到 70% 以下即关闭
-                    _drawerController.animateTo(
-                      (v < -300 || _drawerController.value < 0.7) ? 0.0 : 1.0,
-                      curve: Curves.easeOutQuart,
-                    );
+                  // 速度优先（轻扫 > 250px/s 按甩动方向），否则按位置
+                  //（过半开/不到半关）；弹簧携带手指速度 → 无断裂
+                  if (v < -250) {
+                    _springDrawerTo(0.0, velocityPxPerSec: v);
+                  } else if (v > 250) {
+                    _springDrawerTo(1.0, velocityPxPerSec: v);
                   } else {
-                    // 右滑打开：轻扫（速度 > 300）或超过 30% 即打开
-                    _drawerController.animateTo(
-                      (v > 300 || _drawerController.value > 0.3) ? 1.0 : 0.0,
-                      curve: Curves.easeOutQuart,
-                    );
+                    _springDrawerTo(_drawerController.value >= 0.5 ? 1.0 : 0.0);
                   }
                 },
                 // 手势被抢占/系统取消（如拖动中列表滚动获胜、来电等）：
@@ -5195,11 +5188,26 @@ class _HomePageState extends State<HomePage>
 
   /// 抽屉收敛（所有手势结束路径统一走这里）：动画到就近端点，
   /// 并留一道帧后自检——若动画意外中断仍未到端点，再次收敛
-  void _settleDrawer() {
-    _drawerController.animateTo(
-      _drawerController.value >= 0.5 ? 1.0 : 0.0,
-      curve: Curves.easeOutQuart,
+  /// 抽屉弹簧开合（Kimi/iOS 手感）：从当前位置出发，携带手指速度
+  /// （px/s → 控制器值/s），轻微回弹自然收敛——替代从静止起跑的
+  /// easeOutQuart（速度断裂 = 手感奇怪的主因）
+  void _springDrawerTo(double target, {double velocityPxPerSec = 0}) {
+    _drawerController.animateWith(
+      SpringSimulation(
+        SpringDescription.withDampingRatio(
+          mass: 1,
+          stiffness: 420,
+          ratio: 0.88, // <1 轻微回弹（Kimi/iOS 手感）
+        ),
+        _drawerController.value.clamp(0.0, 1.0),
+        target,
+        velocityPxPerSec / _drawerShift,
+      ),
     );
+  }
+
+  void _settleDrawer() {
+    _springDrawerTo(_drawerController.value >= 0.5 ? 1.0 : 0.0);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // 新拖动进行中或动画仍在跑：不干预
       if (!mounted || _dragStart != null || _drawerController.isAnimating) {
