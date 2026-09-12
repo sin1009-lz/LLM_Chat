@@ -8519,7 +8519,14 @@ class _GlassInputBarState extends State<_GlassInputBar> {
         child: CupertinoLiquidGlass(
           theme: LiquidGlassThemeData(
             shadows: Theme.of(context).brightness == Brightness.dark
-                ? const <BoxShadow>[]
+                ? const <BoxShadow>[
+                    // 暗色：一层柔和阴影（深底上稍高不透明度才可见）
+                    BoxShadow(
+                      color: Color(0x42000000),
+                      blurRadius: 16,
+                      offset: Offset(0, 5),
+                    ),
+                  ]
                 : const <BoxShadow>[
                     BoxShadow(
                       color: Color(0x26000000),
