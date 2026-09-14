@@ -1099,9 +1099,12 @@ class _HomePageState extends State<HomePage>
         // AI 档 = 1568px/80；前端档 = 320px/60。
         // base64 编码统一收集到循环外一次 compute 批量做（多图 MB 级
         // 编码不占主线程）
+        // 硬限制：输出长边 ≤8192px（DS 官方文档单边上限；超过直接拒，
+        // 报误导性 unsupported image）。正常压缩档 1568px 天然满足，
+        // 这里防御的是极端源图在压缩失败兜底/尺寸异常路径下的漏网
         final aiBytes = await compressSingleImageNative(
           bytes,
-          maxSide: _imgMaxSide,
+          maxSide: math.min(_imgMaxSide, 8192),
           quality: _imgQuality,
         );
         if (aiBytes.isEmpty && att.path != null && att.path!.isNotEmpty) {
@@ -1173,14 +1176,27 @@ class _HomePageState extends State<HomePage>
           if (bytes.isNotEmpty) {
             final mime = _mimeFromName(att.name);
             const supported = {'image/webp', 'image/png', 'image/jpeg', 'image/gif'};
-            if (supported.contains(mime) && bytes.length <= 4 << 20) {
+            // 原图直传前置校验：解码读尺寸（无 Android 原生依赖，
+            // package:image 只解析头，快）；任一边 >8192 端点必拒
+            var dimsOk = true;
+            try {
+              final dec = await compute(
+                _imageDimsIsolate,
+                bytes,
+              );
+              dimsOk = dec == null ||
+                  (dec.$1 <= 8192 && dec.$2 <= 8192);
+            } catch (_) {}
+            if (supported.contains(mime) &&
+                bytes.length <= 4 << 20 &&
+                dimsOk) {
               imgJobs.add(att.name);
               imgJobs.add(bytes);
               imgJobs.add(null);
               imgJobs.add(mime);
               continue;
             }
-            _toast('${att.name} 无法压缩且过大（>4MB），请转换为 JPG 后重试');
+            _toast('${att.name} 无法压缩且超限（>4MB 或边长>8192），请转换/裁剪后重试');
           }
         } catch (_) {}
         nameParts.add(att.name);
@@ -10525,6 +10541,18 @@ class _ImageFullscreenState extends State<_ImageFullscreen> {
       .where((l) => l.isNotEmpty)
       .join('\n');
   return (title, lines);
+}
+
+/// 解析图片尺寸（isolate）：只解码获取宽高（package:image 读头），
+/// 供原图直传前的 8192px 边长校验
+(int, int)? _imageDimsIsolate(Uint8List bytes) {
+  try {
+    final dec = im.decodeImage(bytes);
+    if (dec == null) return null;
+    return (dec.width, dec.height);
+  } catch (_) {
+    return null;
+  }
 }
 
 /// 批量 bytes → data URL（isolate 内 base64 编码）：多张大图/
