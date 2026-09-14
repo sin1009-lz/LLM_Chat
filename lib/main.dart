@@ -1099,11 +1099,30 @@ class _HomePageState extends State<HomePage>
         // AI 档 = 1568px/80；前端档 = 320px/60。
         // base64 编码统一收集到循环外一次 compute 批量做（多图 MB 级
         // 编码不占主线程）
-        final aiBytes = await compressSingleImageNative(
+        var aiBytes = await compressSingleImageNative(
           bytes,
           maxSide: _imgMaxSide,
           quality: _imgQuality,
         );
+        // 体积目标 ≤950KB：DeepSeek 等端点对单图有 ~1MB 量级上限
+        //（IMGDIAG 实测：559KB 通过、1.95MB/5.3MB 均被拒，报错文案
+        // 是误导性的 'unsupported image'）。超限时降质量重压，
+        // 极端细节图（长截图）允许降到质量 30
+        for (final q in const [60, 45, 30]) {
+          if (aiBytes.length <= 950 << 10) break;
+          try {
+            final smaller = await FlutterImageCompress.compressWithList(
+              aiBytes,
+              minWidth: _imgMaxSide.round(),
+              minHeight: _imgMaxSide.round(),
+              quality: q,
+              format: CompressFormat.jpeg,
+            );
+            if (smaller.isNotEmpty && smaller.length < aiBytes.length) {
+              aiBytes = smaller;
+            }
+          } catch (_) {}
+        }
         if (aiBytes.isEmpty && att.path != null && att.path!.isNotEmpty) {
           // 二线：文件路径入口的压缩（compressWithList 失败但
           // BitmapFactory 文件路径解码有时仍能成功，如隔行 PNG）
