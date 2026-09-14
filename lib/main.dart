@@ -11127,13 +11127,23 @@ Future<Uint8List> compressSingleImageNative(
       format: CompressFormat.jpeg,
     );
     if (result.isNotEmpty) return result;
-  } catch (_) {}
+    // ignore: avoid_print
+    print('COMPDIAG native empty bytes=${bytes.length}');
+  } catch (e) {
+    // ignore: avoid_print
+    print('COMPDIAG native throw bytes=${bytes.length} e=$e');
+  }
   // 回退：纯 Dart（isolate 里执行）
-  return compute(_compressSingleImageDart, {
+  final dartResult = await compute(_compressSingleImageDart, {
     'bytes': bytes,
     'maxSide': maxSide,
     'quality': quality,
   });
+  if (dartResult.isEmpty) {
+    // ignore: avoid_print
+    print('COMPDIAG dart empty bytes=${bytes.length}');
+  }
+  return dartResult;
 }
 
 Uint8List _compressSingleImageDart(Map<String, dynamic> args) {
