@@ -6062,10 +6062,11 @@ class _HomePageState extends State<HomePage>
         mainAxisSize: MainAxisSize.min,
         children: [
           // 思考过程区（仅 assistant 且有 thinking 时显示）：宽度上限与
-          // 气泡一致（82%，最少 260），靠左填满——折叠/展开宽度统一
+          // 气泡一致（82%，最少 260），靠左填满——折叠/展开宽度统一。
+          // 思考深度开关只影响【发送参数】（关闭思考的显示是既有约定），
+          // 不因切到关闭而隐藏已有思考——深度>0 或存在思考内容即显示
           if (!roundCollected &&
               !isUser &&
-              (_thinkingDepth > 0 || m.truncated) &&
               (m.displayThinking?.isNotEmpty ?? false))
             ConstrainedBox(
               constraints: BoxConstraints(
