@@ -11146,11 +11146,27 @@ Future<Uint8List> compressSingleImageNative(
   required double maxSide,
   required int quality,
 }) async {
+  // 插件的 minWidth/minHeight 语义是"两边都超过才缩"（calcScale =
+  // max(1, min(w/minW, h/minH))）——长截图（一边 < 档位）会以原始
+  // 尺寸原样通过（实测 1080×20000 直出 = 端点 8192 上限必拒）。
+  // 先解码宽高，按真正的最长边约束算目标尺寸，把精确目标传给插件
   try {
+    final dims = await compute(_imageDimsIsolate, bytes);
+    var w = maxSide.round();
+    var h = maxSide.round();
+    if (dims != null && dims.$1 > 0 && dims.$2 > 0) {
+      final srcW = dims.$1, srcH = dims.$2;
+      final longest = math.max(srcW, srcH).toDouble();
+      final scale = longest > maxSide ? maxSide / longest : 1.0;
+      w = math.max(1, (srcW * scale).round());
+      h = math.max(1, (srcH * scale).round());
+      // ignore: avoid_print
+      print('COMPDIAG dims $srcW x $srcH -> $w x $h');
+    }
     final result = await FlutterImageCompress.compressWithList(
       bytes,
-      minWidth: maxSide.round(),
-      minHeight: maxSide.round(),
+      minWidth: w,
+      minHeight: h,
       quality: quality,
       format: CompressFormat.jpeg,
     );
