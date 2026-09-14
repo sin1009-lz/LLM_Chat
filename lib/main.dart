@@ -7996,6 +7996,7 @@ class _HomePageState extends State<HomePage>
               ],
             ],
           ),
+        ),
       ),
     );
   }
@@ -9254,6 +9255,10 @@ class _ThinkingBlock extends StatefulWidget {
 /// 流式期间显示的思考尾部窗口（字符）：约一屏多的量，够看实时输出
 const int _kStreamThinkWindow = 4000;
 
+/// UTF-16 代理项判定（窗口切割保护用）
+bool _isHighSurrogate(int u) => u >= 0xD800 && u <= 0xDBFF;
+bool _isLowSurrogate(int u) => u >= 0xDC00 && u <= 0xDFFF;
+
 class _ThinkingBlockState extends State<_ThinkingBlock> {
   // 默认收起：只显示「思考过程」标签行，点击展开
   bool _expanded = false;
@@ -9333,13 +9338,24 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
     if (head > full.length - _kStreamThinkWindow) {
       head = full.length - _kStreamThinkWindow; // 思考变短（重新生成）
     }
+    // 代理对保护：窗口起止切在增补字符（emoji 等）中间时，半个
+    // 代理项渲染成"斜线豆腐块"（流式滑窗每帧跳动 = 斜线突然出现）
+    if (head > 0 &&
+        head < full.length &&
+        _isHighSurrogate(full.codeUnitAt(head)) &&
+        _isLowSurrogate(full.codeUnitAt(head - 1))) {
+      head++; // 起点切在高代理项前 → 后移一位
+    }
     final streamingWindow =
         widget.streaming && full.length > _kStreamThinkWindow;
     final String text;
     if (!streamingWindow) {
       text = full;
     } else {
-      final end = math.min(head + _kStreamThinkWindow, full.length);
+      var end = math.min(head + _kStreamThinkWindow, full.length);
+      if (end < full.length && _isLowSurrogate(full.codeUnitAt(end))) {
+        end--; // 终点切在低代理项前 → 前移一位
+      }
       text = '${head > 0 ? '…（前面 $head 字已折叠；滚回底部恢复跟随）\n' : ''}'
           '${full.substring(head, end)}'
           '${end < full.length ? '\n…（更新的内容已收起，滚回底部跟随最新）' : ''}';
