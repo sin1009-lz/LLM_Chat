@@ -3502,6 +3502,49 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                     _update((s) => s.copyWith(quickNavEnabled: v)),
               ),
               const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.photo_size_select_large_outlined,
+                title: '发送图片压缩',
+                subtitle: _s.imageCompressEnabled
+                    ? '目标 ${_s.imageMaxMegapixels.toStringAsFixed(_s.imageMaxMegapixels % 1 == 0 ? 0 : 2)} 百万像素（llama.cpp 同款像素预算）'
+                    : '关闭后原图直传（仍受 4MB / 8192px 安全校验）',
+                value: _s.imageCompressEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(imageCompressEnabled: v)),
+              ),
+              if (_s.imageCompressEnabled) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const SizedBox(width: 20),
+                    const Text('目标百万像素'),
+                    Expanded(
+                      child: Slider(
+                        value: _s.imageMaxMegapixels.clamp(0.5, 12.0),
+                        min: 0.5,
+                        max: 12.0,
+                        divisions: 23,
+                        label:
+                            '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
+                        onChanged: (v) => _update(
+                          (s) => s.copyWith(imageMaxMegapixels: v),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 56,
+                      child: Text(
+                        '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
+                        textAlign: TextAlign.end,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    const SizedBox(width: 20),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 12),
 
               // ── 渲染 ──
               _sectionLabel('渲染'),

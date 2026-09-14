@@ -32,6 +32,8 @@ class GeneralSettings {
   const GeneralSettings({
     required this.pasteLongTextAsFile,
     required this.pasteThreshold,
+    required this.imageCompressEnabled,
+    required this.imageMaxMegapixels,
     required this.quickNavEnabled,
     required this.titleStrategy,
     required this.aiTitleModel,
@@ -64,6 +66,8 @@ class GeneralSettings {
   static const defaults = GeneralSettings(
     pasteLongTextAsFile: true,
     quickNavEnabled: true,
+    imageCompressEnabled: true,
+    imageMaxMegapixels: 1.69,
     pasteThreshold: 2000,
     titleStrategy: TitleStrategy.ai,
     aiTitleModel: '',
@@ -106,6 +110,13 @@ class GeneralSettings {
 
   /// 上滑快捷导航（回到顶部/上一条消息/回到底部）开关
   final bool quickNavEnabled;
+
+  /// 发送图片压缩开关（关 = 原图直传，受 4MB/8192px 安全校验）
+  final bool imageCompressEnabled;
+
+  /// 图片压缩目标百万像素（llama.cpp 同款；默认 1.69MP ≈ 端点
+  /// 进模型前的有效分辨率）
+  final double imageMaxMegapixels;
 
   /// 对话标题策略
   final TitleStrategy titleStrategy;
@@ -212,11 +223,15 @@ class GeneralSettings {
     bool? pdfAsImage,
     bool? contextPercent,
     bool? quickNavEnabled,
+    bool? imageCompressEnabled,
+    double? imageMaxMegapixels,
     int? reactMaxRounds,
   }) => GeneralSettings(
     pasteLongTextAsFile: pasteLongTextAsFile ?? this.pasteLongTextAsFile,
     pasteThreshold: pasteThreshold ?? this.pasteThreshold,
     quickNavEnabled: quickNavEnabled ?? this.quickNavEnabled,
+    imageCompressEnabled: imageCompressEnabled ?? this.imageCompressEnabled,
+    imageMaxMegapixels: imageMaxMegapixels ?? this.imageMaxMegapixels,
     titleStrategy: titleStrategy ?? this.titleStrategy,
     aiTitleModel: aiTitleModel ?? this.aiTitleModel,
     aiTitlePrompt: aiTitlePrompt ?? this.aiTitlePrompt,
@@ -249,6 +264,8 @@ class GeneralSettings {
     'pasteLongTextAsFile': pasteLongTextAsFile,
     'pasteThreshold': pasteThreshold,
     'quickNavEnabled': quickNavEnabled,
+    'imageCompressEnabled': imageCompressEnabled,
+    'imageMaxMegapixels': imageMaxMegapixels,
     'titleStrategy': titleStrategy.toJson(),
     'aiTitleModel': aiTitleModel,
     'aiTitlePrompt': aiTitlePrompt,
@@ -285,6 +302,11 @@ class GeneralSettings {
       pasteThreshold:
           (j['pasteThreshold'] as num?)?.toInt() ?? d.pasteThreshold,
       quickNavEnabled: j['quickNavEnabled'] as bool? ?? d.quickNavEnabled,
+      imageCompressEnabled:
+          j['imageCompressEnabled'] as bool? ?? d.imageCompressEnabled,
+      imageMaxMegapixels:
+          (j['imageMaxMegapixels'] as num?)?.toDouble() ??
+          d.imageMaxMegapixels,
       titleStrategy: TitleStrategy.fromJson(
         j['titleStrategy'] as String? ?? '',
       ),

@@ -1102,10 +1102,15 @@ class _HomePageState extends State<HomePage>
         // 硬限制：输出长边 ≤8192px（DS 官方文档单边上限；超过直接拒，
         // 报误导性 unsupported image）。正常压缩档 1568px 天然满足，
         // 这里防御的是极端源图在压缩失败兜底/尺寸异常路径下的漏网
+        // 压缩开关（通用设置）：关 = 走兜底原图直传（4MB/8192px 校验）
+        if (!_general.imageCompressEnabled) {
+          throw StateError('image compress disabled');
+        }
         final aiBytes = await compressSingleImageNative(
           bytes,
           maxSide: math.min(_imgMaxSide, 8192),
           quality: _imgQuality,
+          maxMegapixels: _general.imageMaxMegapixels,
         );
         if (aiBytes.isEmpty && att.path != null && att.path!.isNotEmpty) {
           // 二线：文件路径入口的压缩（compressWithList 失败但
@@ -11145,6 +11150,7 @@ Future<Uint8List> compressSingleImageNative(
   Uint8List bytes, {
   required double maxSide,
   required int quality,
+  double maxMegapixels = 1.69,
 }) async {
   // 插件的 minWidth/minHeight 语义是"两边都超过才缩"（calcScale =
   // max(1, min(w/minW, h/minH))）——长截图（一边 < 档位）会以原始
@@ -11161,8 +11167,12 @@ Future<Uint8List> compressSingleImageNative(
       final srcW = dims.$1, srcH = dims.$2;
       final longest = math.max(srcW, srcH).toDouble();
       final shortest = math.min(srcW, srcH).toDouble();
-      // 默认缩放：长边 → maxSide
-      var scale = math.min(1.0, maxSide / longest);
+      // 默认缩放：长边 ≤ maxSide 且 总像素 ≤ maxMegapixels（llama.cpp
+      // 同款像素预算——端点进模型前也会缩到 ~1.69MP，超发无益）
+      var scale = math.min(
+        math.min(1.0, maxSide / longest),
+        math.sqrt(maxMegapixels * 1e6 / (srcW * srcH)),
+      );
       // 长宽比保护：短边按默认缩放 < 360px（细条不可读）→ 放宽，
       // 目标短边 360px，但受两条硬约束：长边 ≤ 8192、总像素 ≤ 3.2MP
       if (shortest * scale < 360) {
