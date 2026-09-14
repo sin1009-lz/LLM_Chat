@@ -1099,35 +1099,11 @@ class _HomePageState extends State<HomePage>
         // AI 档 = 1568px/80；前端档 = 320px/60。
         // base64 编码统一收集到循环外一次 compute 批量做（多图 MB 级
         // 编码不占主线程）
-        var aiBytes = await compressSingleImageNative(
+        final aiBytes = await compressSingleImageNative(
           bytes,
           maxSide: _imgMaxSide,
           quality: _imgQuality,
         );
-        // 体积目标 ≤950KB + 像素预算 ≤1.69MP（≈1300×1300）：
-        // ① IMGDIAG 实测 DS 对大图拒收（559KB 过、1.95MB/5.3MB 拒），
-        //   报错文案'unsupported image'有误导性
-        // ② DS 官方文档：进模型前按比例缩到 ~1300×1300 总像素——
-        //   发更大的图也是白发（端点自己会缩），对齐它自己的有效
-        //   分辨率既保证合规又不损识别质量
-        // 迭代：质量 60→45→30，仍超则尺寸 1200→900 再压
-        var side = _imgMaxSide.round();
-        for (final q in const [60, 45, 30, 30, 30]) {
-          if (aiBytes.length <= 950 << 10) break;
-          try {
-            final smaller = await FlutterImageCompress.compressWithList(
-              aiBytes,
-              minWidth: side,
-              minHeight: side,
-              quality: q,
-              format: CompressFormat.jpeg,
-            );
-            if (smaller.isNotEmpty && smaller.length < aiBytes.length) {
-              aiBytes = smaller;
-            }
-          } catch (_) {}
-          if (q == 30 && side > 900) side = side == _imgMaxSide.round() ? 1200 : 900;
-        }
         if (aiBytes.isEmpty && att.path != null && att.path!.isNotEmpty) {
           // 二线：文件路径入口的压缩（compressWithList 失败但
           // BitmapFactory 文件路径解码有时仍能成功，如隔行 PNG）
