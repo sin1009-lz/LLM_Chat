@@ -2306,12 +2306,18 @@ class _HomePageState extends State<HomePage>
     }
     return [
       {'type': 'text', 'text': m.modelContent},
-      ...images.map(
-        (img) => {
+      ...images.map((img) {
+        // 历史脏前缀修复（同 LlmService._contentPayload）
+        var url = img.dataUrl;
+        if (!url.startsWith('data:image/')) {
+          final comma = url.indexOf(',');
+          if (comma > 0) url = 'data:image/jpeg;base64,${url.substring(comma + 1)}';
+        }
+        return {
           'type': 'image_url',
-          'image_url': {'url': img.dataUrl},
-        },
-      ),
+          'image_url': {'url': url},
+        };
+      }),
     ];
   }
 
@@ -2402,6 +2408,7 @@ class _HomePageState extends State<HomePage>
           model: model,
           thinkingDepth: thinkingDepth,
           tools: mcpTools,
+          supportsImages: _modelSupportsMultimodal,
         )) {
           if (!mounted) return;
           if (_stopRequested) {

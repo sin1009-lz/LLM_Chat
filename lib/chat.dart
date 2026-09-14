@@ -1235,6 +1235,9 @@ class LlmService {
     String? systemPrompt,
     List<Map<String, dynamic>>? tools,
     String toolChoice = 'auto',
+    // 当前模型是否支持图片（false = 历史中的用户图片不进载荷，
+    // DeepSeek 等纯文本端点遇到 image_url 会整单 400）
+    bool supportsImages = true,
   }) async* {
     final url = Uri.parse(
       '${_baseUrl.replaceAll(RegExp(r'/$'), '')}/chat/completions',
@@ -1253,7 +1256,10 @@ class LlmService {
                 (m.fileParts?.isNotEmpty ?? false),
           )
           .map(
-            (m) => {'role': _roleName(m.role), 'content': _contentPayload(m)},
+            (m) => {
+          'role': _roleName(m.role),
+          'content': _contentPayload(m, supportsImages: supportsImages),
+        },
           ),
     ];
     final req = http.Request('POST', url)
@@ -1320,19 +1326,30 @@ class LlmService {
   /// 文件部件（文本附件）内容已并入 modelContent。
   /// 仅用户消息的图片进载荷——助手图片是 send_image 工具发给用户看的，
   /// 回传 image_url 会被多数端点 400（assistant 角色不支持图像内容）
-  Object _contentPayload(Message m) {
+  Object _contentPayload(Message m, {bool supportsImages = true}) {
     final images = m.imageParts;
-    if (m.role != Role.user || images == null || images.isEmpty) {
+    if (!supportsImages ||
+        m.role != Role.user ||
+        images == null ||
+        images.isEmpty) {
       return m.modelContent;
     }
     return [
       {'type': 'text', 'text': m.modelContent},
-      ...images.map(
-        (img) => {
+      ...images.map((img) {
+        // 历史脏前缀修复：MIME 错位 bug 期间（6f24b01 之前）存的
+        // dataUrl 前缀是 data:文件名.jpg;base64,——严格端点（DeepSeek）
+        // 校验前缀直接 400 unsupported image；宽容端点不报 = 只有 DS 报
+        var url = img.dataUrl;
+        if (!url.startsWith('data:image/')) {
+          final comma = url.indexOf(',');
+          if (comma > 0) url = 'data:image/jpeg;base64,${url.substring(comma + 1)}';
+        }
+        return {
           'type': 'image_url',
-          'image_url': {'url': img.dataUrl},
-        },
-      ),
+          'image_url': {'url': url},
+        };
+      }),
     ];
   }
 
@@ -1382,6 +1399,7 @@ class LlmService {
     int thinkingDepth = 1,
     List<Map<String, dynamic>>? tools,
     String toolChoice = 'auto',
+    bool supportsImages = true,
   }) async* {
     final url = Uri.parse(
       '${_baseUrl.replaceAll(RegExp(r'/$'), '')}/chat/completions',
