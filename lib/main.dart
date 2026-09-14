@@ -2304,6 +2304,12 @@ class _HomePageState extends State<HomePage>
     if (m.role != Role.user || images == null || images.isEmpty) {
       return m.modelContent;
     }
+    // 诊断：原始前缀（修复前）打 logcat
+    // ignore: avoid_print
+    print(
+      'IMGDIAG n=${images.length} lens=${images.map((i) => i.dataUrl.length).join(',')} '
+      'prefixes=${images.map((i) => i.dataUrl.substring(0, 36)).join(' | ')}',
+    );
     return [
       {'type': 'text', 'text': m.modelContent},
       ...images.map((img) {
