@@ -1104,17 +1104,21 @@ class _HomePageState extends State<HomePage>
           maxSide: _imgMaxSide,
           quality: _imgQuality,
         );
-        // 体积目标 ≤950KB：DeepSeek 等端点对单图有 ~1MB 量级上限
-        //（IMGDIAG 实测：559KB 通过、1.95MB/5.3MB 均被拒，报错文案
-        // 是误导性的 'unsupported image'）。超限时降质量重压，
-        // 极端细节图（长截图）允许降到质量 30
-        for (final q in const [60, 45, 30]) {
+        // 体积目标 ≤950KB + 像素预算 ≤1.69MP（≈1300×1300）：
+        // ① IMGDIAG 实测 DS 对大图拒收（559KB 过、1.95MB/5.3MB 拒），
+        //   报错文案'unsupported image'有误导性
+        // ② DS 官方文档：进模型前按比例缩到 ~1300×1300 总像素——
+        //   发更大的图也是白发（端点自己会缩），对齐它自己的有效
+        //   分辨率既保证合规又不损识别质量
+        // 迭代：质量 60→45→30，仍超则尺寸 1200→900 再压
+        var side = _imgMaxSide.round();
+        for (final q in const [60, 45, 30, 30, 30]) {
           if (aiBytes.length <= 950 << 10) break;
           try {
             final smaller = await FlutterImageCompress.compressWithList(
               aiBytes,
-              minWidth: _imgMaxSide.round(),
-              minHeight: _imgMaxSide.round(),
+              minWidth: side,
+              minHeight: side,
               quality: q,
               format: CompressFormat.jpeg,
             );
@@ -1122,6 +1126,7 @@ class _HomePageState extends State<HomePage>
               aiBytes = smaller;
             }
           } catch (_) {}
+          if (q == 30 && side > 900) side = side == _imgMaxSide.round() ? 1200 : 900;
         }
         if (aiBytes.isEmpty && att.path != null && att.path!.isNotEmpty) {
           // 二线：文件路径入口的压缩（compressWithList 失败但
