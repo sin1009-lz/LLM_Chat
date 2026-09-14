@@ -2915,6 +2915,10 @@ class _HomePageState extends State<HomePage>
   int _lastStreamFlushMs = 0;
 
   /// 累积流式 delta（[acc] 为 ReAct 本轮的 content 缓冲，需即时同步）
+  /// 上一帧 delta 尾部悬置的高代理项（SSE 分块把 emoji 切成两半时，
+  /// 前半孤立即渲染为斜线豆腐块；扣留到下一块补齐再入缓冲）
+  String _pendingHiSurrogate = '';
+
   void _streamAccumulate(
     Message msg,
     String? thinking,
@@ -2922,12 +2926,29 @@ class _HomePageState extends State<HomePage>
     StringBuffer? acc,
   }) {
     _streamMsg = msg;
+    // 尾部代理项扣留：chunk 末尾是高代理项（后半个还没来）→ 暂存，
+    // 下一帧拼到头部；chunk 头部是孤立低代理项（前半在上帧被扣）→
+    /// 与扣留项拼成完整字符
+    String joinPending(String chunk) {
+      var c = chunk;
+      if (_pendingHiSurrogate.isNotEmpty) {
+        c = _pendingHiSurrogate + c;
+        _pendingHiSurrogate = '';
+      }
+      if (c.isNotEmpty && _isHighSurrogate(c.codeUnitAt(c.length - 1))) {
+        _pendingHiSurrogate = c[c.length - 1];
+        c = c.substring(0, c.length - 1);
+      }
+      return c;
+    }
+
     if (thinking != null && thinking.isNotEmpty) {
-      _streamBufThinking += thinking;
+      _streamBufThinking += joinPending(thinking);
     }
     if (content != null && content.isNotEmpty) {
-      _streamBufContent += content;
-      acc?.write(content);
+      final joined = joinPending(content);
+      _streamBufContent += joined;
+      acc?.write(joined);
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     final elapsed = now - _lastStreamFlushMs;
@@ -2955,6 +2976,16 @@ class _HomePageState extends State<HomePage>
     // 只有正在流式的那条重建（HomePage 零重建）
     if (t.isNotEmpty) msg.thinking = (msg.thinking ?? '') + t;
     if (c.isNotEmpty) msg.content += c;
+    // 流结束（非 tick 定时器驱动）：扣留的半字符一并放出
+    //（其后不再有 delta；emoji 被流截断在服务端时宁留 tofu 也不丢）
+    if (_streamFlushTimer == null && _pendingHiSurrogate.isNotEmpty) {
+      if (t.isNotEmpty) {
+        msg.thinking = (msg.thinking ?? '') + _pendingHiSurrogate;
+      } else if (c.isNotEmpty) {
+        msg.content += _pendingHiSurrogate;
+      }
+      _pendingHiSurrogate = '';
+    }
     _streamTick.value++;
   }
 
