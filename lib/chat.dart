@@ -230,6 +230,14 @@ class ImagePart {
     this.thumbUrl,
   });
 
+  /// 换 dataUrl 的副本（历史脏前缀修复用）
+  ImagePart copyWithUrl(String url) => ImagePart(
+    name: name,
+    mimeType: mimeType,
+    dataUrl: url,
+    thumbUrl: thumbUrl,
+  );
+
   final String name;
   final String mimeType;
 
@@ -1334,22 +1342,36 @@ class LlmService {
         images.isEmpty) {
       return m.modelContent;
     }
+    // 诊断（定位多图 400）：输出每张图的前 36 字符前缀到 logcat，
+    // 复现后用 adb logcat -s flutter | grep IMGDIAG 读取
+    var imgs = images;
+    // 历史脏前缀修复：MIME 错位 bug 期间（6f24b01 之前）存的
+    // dataUrl 前缀是 data:文件名.jpg;base64,——严格端点（DeepSeek）
+    // 校验前缀直接 400 unsupported image；宽容端点不报 = 只有 DS 报
+    if (images.any((i) => !i.dataUrl.startsWith('data:image/'))) {
+      imgs = [
+        for (final img in images)
+          img.copyWithUrl(
+            img.dataUrl.startsWith('data:image/')
+                ? img.dataUrl
+                : 'data:image/jpeg;base64,'
+                      '${img.dataUrl.substring(img.dataUrl.indexOf(',') + 1)}',
+          ),
+      ];
+    }
+    // ignore: avoid_print
+    print(
+      'IMGDIAG n=${imgs.length} lens=${imgs.map((i) => i.dataUrl.length).join(',')} '
+      'prefixes=${imgs.map((i) => i.dataUrl.substring(0, 36)).join(' | ')}',
+    );
     return [
       {'type': 'text', 'text': m.modelContent},
-      ...images.map((img) {
-        // 历史脏前缀修复：MIME 错位 bug 期间（6f24b01 之前）存的
-        // dataUrl 前缀是 data:文件名.jpg;base64,——严格端点（DeepSeek）
-        // 校验前缀直接 400 unsupported image；宽容端点不报 = 只有 DS 报
-        var url = img.dataUrl;
-        if (!url.startsWith('data:image/')) {
-          final comma = url.indexOf(',');
-          if (comma > 0) url = 'data:image/jpeg;base64,${url.substring(comma + 1)}';
-        }
-        return {
+      ...imgs.map(
+        (img) => {
           'type': 'image_url',
-          'image_url': {'url': url},
-        };
-      }),
+          'image_url': {'url': img.dataUrl},
+        },
+      ),
     ];
   }
 
