@@ -6586,19 +6586,24 @@ class _HomePageState extends State<HomePage>
   }) {
     return Tooltip(
       message: tooltip,
-      child: InkWell(
+      // 气泡表面没有 Material 祖先 → InkWell 涟漪无处渲染（点了没反应）
+      child: Material(
+        color: Colors.transparent,
         borderRadius: BorderRadius.circular(10),
-        onTap: onTap,
-        // 按下反馈色（默认主题涟漪；删除按钮传浅红）
-        highlightColor: pressedColor,
-        splashColor: pressedColor,
-        child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: Icon(
-            icon,
-            size: 16,
-            color: (color ?? Theme.of(context).colorScheme.onSurfaceVariant)
-                .withValues(alpha: onTap == null ? 0.3 : 1),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: onTap,
+          // 按下反馈色（默认主题涟漪；删除按钮传浅红）
+          highlightColor: pressedColor,
+          splashColor: pressedColor,
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Icon(
+              icon,
+              size: 16,
+              color: (color ?? Theme.of(context).colorScheme.onSurfaceVariant)
+                  .withValues(alpha: onTap == null ? 0.3 : 1),
+            ),
           ),
         ),
       ),
