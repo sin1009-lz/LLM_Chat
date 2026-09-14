@@ -443,6 +443,10 @@ class _HomePageState extends State<HomePage>
   /// 拖动起点（用于滑动角度阈值判定）
   Offset? _dragStart;
 
+  /// 本次横向拖动是否自左缘起手（抽屉关闭态的开抽屉资格）；
+  /// 非边缘起手时让内层横向滚动（表格/代码块）赢得手势
+  bool _drawerEdgeSwipe = false;
+
   /// 滑动角度阈值：与水平线夹角超过 30°（tan30°≈0.577）不触发抽屉
   static const double _dragAngleThreshold = 0.577;
 
@@ -5417,10 +5421,20 @@ class _HomePageState extends State<HomePage>
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onHorizontalDragStart: (d) {
+                  // 边缘区手势：抽屉关闭时仅左缘 44px 内的右滑触发开抽屉
+                  // ——全屏横向手势会让表格/代码块的横向滚动永远输掉
+                  // 手势竞技场（本层在 Stack 顶部、先入队即平局获胜方）
+                  _drawerEdgeSwipe =
+                      _drawerController.value < 0.01 &&
+                      d.globalPosition.dx < 44;
                   _dragStart = d.localPosition;
                   _drawerController.stop();
                 },
                 onHorizontalDragUpdate: (d) {
+                  // 抽屉关闭态且非边缘起手：不消费（让内层横向滚动赢）
+                  if (_drawerController.value < 0.01 && !_drawerEdgeSwipe) {
+                    return;
+                  }
                   // 滑动角度阈值：累计方向与水平夹角 > 30° 时忽略
                   //（斜向滑动不触发抽屉，避免误触）
                   final start = _dragStart;
