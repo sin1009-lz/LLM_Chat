@@ -11149,7 +11149,10 @@ Future<Uint8List> compressSingleImageNative(
   // 插件的 minWidth/minHeight 语义是"两边都超过才缩"（calcScale =
   // max(1, min(w/minW, h/minH))）——长截图（一边 < 档位）会以原始
   // 尺寸原样通过（实测 1080×20000 直出 = 端点 8192 上限必拒）。
-  // 先解码宽高，按真正的最长边约束算目标尺寸，把精确目标传给插件
+  // 先解码宽高，按真正的最长边约束算目标尺寸，把精确目标传给插件。
+  // 长宽比保护：极端长截图按长边缩会压成细条（84×1568 不可读）——
+  // 短边低于 360px 时放宽长边预算（分段：最多 4 段、总像素 ≤3.2MP、
+  // 长边硬顶 8192），保持文字可读的同时不破端点上限
   try {
     final dims = await compute(_imageDimsIsolate, bytes);
     var w = maxSide.round();
@@ -11157,7 +11160,17 @@ Future<Uint8List> compressSingleImageNative(
     if (dims != null && dims.$1 > 0 && dims.$2 > 0) {
       final srcW = dims.$1, srcH = dims.$2;
       final longest = math.max(srcW, srcH).toDouble();
-      final scale = longest > maxSide ? maxSide / longest : 1.0;
+      final shortest = math.min(srcW, srcH).toDouble();
+      // 默认缩放：长边 → maxSide
+      var scale = math.min(1.0, maxSide / longest);
+      // 长宽比保护：短边按默认缩放 < 360px（细条不可读）→ 放宽，
+      // 目标短边 360px，但受两条硬约束：长边 ≤ 8192、总像素 ≤ 3.2MP
+      if (shortest * scale < 360) {
+        var s2 = 360.0 / shortest;
+        s2 = math.min(s2, 8192.0 / longest);
+        s2 = math.min(s2, math.sqrt(3.2e6 / (srcW * srcH)));
+        scale = s2.clamp(scale, 1.0);
+      }
       w = math.max(1, (srcW * scale).round());
       h = math.max(1, (srcH * scale).round());
       // ignore: avoid_print
