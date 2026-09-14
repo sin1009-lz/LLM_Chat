@@ -191,6 +191,10 @@ extension _MarkdownViewRender on MarkdownView {
         if (latexEnabled) 'code': _InlineCodeBuilder(textColor: textColor),
       },
       styleSheet: MarkdownStyleSheet(
+        // 表格按内容自然宽度 + 横向拖拽（包内对 Intrinsic 列宽自动
+        // 包横向 SingleChildScrollView + Scrollbar；默认 Flex 列宽
+        // 会把宽表挤进气泡）
+        tableColumnWidth: const IntrinsicColumnWidth(),
         p: TextStyle(height: 1.5, color: textColor),
         strong: TextStyle(color: textColor, fontWeight: FontWeight.w700),
         em: const TextStyle(fontStyle: FontStyle.italic),
@@ -421,20 +425,25 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(10),
       ),
-      child: SelectableText.rich(
-        TextSpan(
-          style: const TextStyle(
-            fontFamily: 'monospace',
-            fontSize: 12.5,
-            height: 1.5,
-            color: Color(0xFFD4D4D4),
+      // 横向滚动：横向无界约束下文本按自然宽度排版（不折行），
+      // 长行拖拽查看；纵向仍由气泡列表滚动
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.all(10),
+        child: SelectableText.rich(
+          TextSpan(
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 12.5,
+              height: 1.5,
+              color: Color(0xFFD4D4D4),
+            ),
+            children: _highlight(code, lang),
           ),
-          children: _highlight(code, lang),
         ),
       ),
     );
