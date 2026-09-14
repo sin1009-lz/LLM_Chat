@@ -1104,9 +1104,47 @@ class _HomePageState extends State<HomePage>
           maxSide: _imgMaxSide,
           quality: _imgQuality,
         );
+        if (aiBytes.isEmpty && att.path != null && att.path!.isNotEmpty) {
+          // 二线：文件路径入口的压缩（compressWithList 失败但
+          // BitmapFactory 文件路径解码有时仍能成功，如隔行 PNG）
+          try {
+            final retry = await FlutterImageCompress.compressWithFile(
+              att.path!,
+              minWidth: _imgMaxSide.round(),
+              minHeight: _imgMaxSide.round(),
+              quality: _imgQuality,
+              format: CompressFormat.jpeg,
+            );
+            if (retry != null && retry.isNotEmpty) {
+              imgJobs.add(att.name);
+              imgJobs.add(retry);
+              // 前端小图：同源再缩
+              Uint8List thumb2;
+              try {
+                thumb2 = await FlutterImageCompress.compressWithList(
+                  retry,
+                  minWidth: 320,
+                  minHeight: 320,
+                  quality: 60,
+                  format: CompressFormat.jpeg,
+                );
+              } catch (_) {
+                thumb2 = retry;
+              }
+              imgJobs.add(thumb2);
+              imgJobs.add('image/jpeg');
+              continue;
+            }
+          } catch (_) {}
+        }
         if (aiBytes.isEmpty) {
-          // 压缩失败（原生 + Dart 回退都解不了，如 HEIC 变体）：
+          // 压缩失败（原生两路 + Dart 回退都解不了，如 HEIC 变体）：
           // 走兜底路径，不能把空/伪 jpeg 发给端点
+          // ignore: avoid_print
+          print(
+            'COMPDIAG fail name=${att.name} bytes=${bytes.length} '
+            'path=${att.path}',
+          );
           throw StateError('image compress failed');
         }
         // 前端小图：从 AI 档再缩（原生，快）
@@ -1135,14 +1173,14 @@ class _HomePageState extends State<HomePage>
           if (bytes.isNotEmpty) {
             final mime = _mimeFromName(att.name);
             const supported = {'image/webp', 'image/png', 'image/jpeg', 'image/gif'};
-            if (supported.contains(mime)) {
+            if (supported.contains(mime) && bytes.length <= 4 << 20) {
               imgJobs.add(att.name);
               imgJobs.add(bytes);
               imgJobs.add(null);
               imgJobs.add(mime);
               continue;
             }
-            _toast('${att.name} 格式不受模型支持（HEIC 等），请转换为 JPG 后重试');
+            _toast('${att.name} 无法压缩且过大（>4MB），请转换为 JPG 后重试');
           }
         } catch (_) {}
         nameParts.add(att.name);
