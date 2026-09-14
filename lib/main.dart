@@ -3826,6 +3826,7 @@ class _HomePageState extends State<HomePage>
     Object e,
   ) async {
     _streamSub = null;
+    _logReqErr(e);
     // send_image 暂存图片：错误轮也保留（挂到错误消息上）
     if (_pendingToolImages.isNotEmpty) {
       assistantMsg.imageParts = [
@@ -3844,6 +3845,12 @@ class _HomePageState extends State<HomePage>
         ..error = true;
     });
     await _persist(conv);
+  }
+
+  /// 诊断：端点报错原文打 logcat（REQERR），复现后取证
+  void _logReqErr(Object e) {
+    // ignore: avoid_print
+    print('REQERR ${e.toString().substring(0, e.toString().length.clamp(0, 500))}');
   }
 
   /// 停止流式（保留已收部分）。若停止时助手消息完全为空
