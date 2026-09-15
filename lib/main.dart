@@ -32,6 +32,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'chat.dart';
+import 'edge_tts.dart';
 import 'doc_extract.dart';
 import 'general_settings.dart';
 import 'ui_tokens.dart';
@@ -453,85 +454,25 @@ class _HomePageState extends State<HomePage>
   /// 变化即全列表失效缓存，杜绝「设置改了界面不动」类漏洞
   int _renderEpoch = 0;
 
-  // ── 免费 TTS：WebView speechSynthesis（WebView 内置 Web Speech API，
-  // 走微软/系统神经语音，免密钥免部署免自建服务）──
-  WebViewController? _speechTts;
-  bool _speechTtsReady = false;
-
+  // ── 朗读状态（Edge TTS / 在线 API 共用）──
   /// 正在朗读的消息对象（null = 空闲）；同屏仅一条在播
   Message? _speakingMsg;
 
   /// 朗读会话号：停止/切消息时自增——旧管道据此自杀
-  Future<void> _initTts() async {
-    if (_speechTts != null) return;
-    final c = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted);
-    // 关键：Web Speech API 在 data:/about:blank 源上部分 WebView 禁用
-    //（在线语音引擎只对 http(s) 源开放）——借道本地环回 HTTP 服务的
-    // kernel.html（与 Python 内核同源同服务），返回一个干净空白页
-    try {
-      await _ensurePyServer();
-      final port = _pyServer!.port;
-      await c.loadRequest(
-        Uri.parse('http://127.0.0.1:$port/kernel.html?blank=1'),
-      );
-    } catch (_) {
-      try {
-        await c.loadHtmlString('<html><body></body></html>');
-      } catch (_) {}
-    }
-    _speechTts = c;
-    if (mounted) setState(() {});
-    await WidgetsBinding.instance.endOfFrame;
-    await Future<void>.delayed(const Duration(milliseconds: 150));
-    try {
-      final r = await c.runJavaScriptReturningResult(
-        'typeof speechSynthesis !== "undefined" ? 1 : -1',
-      );
-      _speechTtsReady = r.toString().contains('1');
-    } catch (_) {
-      _speechTtsReady = false;
-    }
-    if (mounted) setState(() {});
-  }
+  int _speakSession = 0;
 
-  /// 朗读/停止切换：同一条再点 = 停止；新消息点 = 换朗读对象
+  /// 朗读/停止切换：同一条再点 = 停止；新消息点 = 换朗读对象。
+  /// 优先级：配置了在线 API 且开关开 → 云端；否则 Edge TTS（免密钥）
   Future<void> _toggleSpeak(Message m) async {
-    await _initTts();
-    final t = _speechTts;
-    if (t == null || !_speechTtsReady) {
-      _toast('语音引擎不可用');
-      return;
-    }
     if (identical(_speakingMsg, m)) {
       await _stopSpeaking();
       return;
     }
-    // 在线 API 优先（用户配置了就走云端合成）
     if (_general.ttsUseApi && _general.ttsBaseUrl.trim().isNotEmpty) {
       await _speakViaApi(m);
       return;
     }
-    final text = applyDisplayRules(m.content, _replaceRules).trim();
-    final speakText = text.length > 3000 ? text.substring(0, 3000) : text;
-    if (speakText.isEmpty) return;
-    await _stopSpeaking();
-    final session = ++_speakSession;
-    setState(() => _speakingMsg = m);
-    final parts = jsonEncode(_splitForTts(speakText, maxTotal: 3000));
-    final js = '(function(){try{speechSynthesis.cancel();var parts=__PARTS__;var i=0;function next(){if(i>=parts.length){pySpeechDone.postMessage("done");return;}var u=new SpeechSynthesisUtterance(parts[i++]);u.lang="zh-CN";u.rate=__RATE__;u.onend=next;u.onerror=function(){pySpeechDone.postMessage("done");};speechSynthesis.speak(u);}next();}catch(e){pySpeechDone.postMessage("done");}})()'
-        .replaceAll('__PARTS__', parts)
-        .replaceAll('__RATE__', _general.ttsSpeed.toStringAsFixed(2));
-    await t.addJavaScriptChannel(
-      'pySpeechDone',
-      onMessageReceived: (_) {
-        if (session == _speakSession) {
-          _speakingMsg = null;
-          if (mounted) setState(() {});
-        }
-      },
-    );
-    await t.runJavaScript(js);
+    await _speakViaEdge(m);
   }
 
   /// 停止朗读（切换会话/删除消息等场景调用）
@@ -539,19 +480,59 @@ class _HomePageState extends State<HomePage>
     if (_speakingMsg == null) return;
     _speakingMsg = null;
     _speakSession++;
-    _speechTts?.runJavaScript(
-      'try{speechSynthesis.cancel();}catch(e){}',
-    );
-    await _audioPlayer?.stop();
+    _audioPlayer?.stop();
     if (mounted) setState(() {});
+  }
+
+  /// Edge TTS 朗读（免密钥）：复用伪流式管道（分段合成 + 预取）
+  Future<void> _speakViaEdge(Message m) async {
+    final text = applyDisplayRules(m.content, _replaceRules).trim();
+    if (text.isEmpty) return;
+    final segs = _splitForTts(text, maxTotal: 3000);
+    if (segs.isEmpty) return;
+    final session = ++_speakSession;
+    setState(() => _speakingMsg = m);
+    final player = _audioPlayer ??= AudioPlayer();
+    await player.stop();
+    try {
+      var prefetch = EdgeTts.synth(
+        segs[0],
+        rate: _general.ttsSpeed,
+        voice: _general.ttsVoice.trim().isEmpty
+            ? 'zh-CN-XiaoxiaoNeural'
+            : _general.ttsVoice.trim(),
+      );
+      for (var i = 0; i < segs.length; i++) {
+        if (session != _speakSession) return;
+        final bytes = await prefetch;
+        if (session != _speakSession) return;
+        if (i + 1 < segs.length) {
+          prefetch = EdgeTts.synth(
+            segs[i + 1],
+            rate: _general.ttsSpeed,
+            voice: _general.ttsVoice.trim().isEmpty
+                ? 'zh-CN-XiaoxiaoNeural'
+                : _general.ttsVoice.trim(),
+          );
+        }
+        await player.setAudioSource(_BytesAudioSource(bytes));
+        await player.play();
+      }
+    } catch (e) {
+      if (session == _speakSession) {
+        _toast('免费语音失败（可能是地区限制）：$e，可配置在线语音 API');
+      }
+    } finally {
+      if (session == _speakSession) {
+        _speakingMsg = null;
+        if (mounted) setState(() {});
+      }
+    }
   }
 
   // ── 在线语音 API（OpenAI 兼容 /audio/speech；系统 TTS 引擎在
   // 部分国产 ROM 上不给第三方绑定，这是主朗读方案）──
   AudioPlayer? _audioPlayer;
-
-  /// 朗读会话号：每次开始/停止自增——旧的分段管道据此自杀
-  int _speakSession = 0;
 
   /// 伪流式朗读（Kimi 思路）：文本按语义切段，逐段合成 + 播放当前段时
   /// 预取下一段——首段几百毫秒即出声，段间几乎无感衔接。
@@ -5027,7 +5008,7 @@ class _HomePageState extends State<HomePage>
     _fastNavVisible.dispose();
     _awayFromBottom.dispose();
     _inputBarAnimatedTop.dispose();
-    _speechTts?.runJavaScript('try{speechSynthesis.cancel();}catch(e){}');
+    _audioPlayer?.stop();
     _streamSub?.cancel();
     _maintainTimer?.cancel();
     _chatScroll.dispose();
@@ -5403,17 +5384,6 @@ class _HomePageState extends State<HomePage>
               width: 2,
               height: 2,
               child: IgnorePointer(child: WebViewWidget(controller: _webReader!)),
-            ),
-          ),
-        // 免费 TTS 宿主（speechSynthesis）
-        if (_speechTts != null)
-          Positioned(
-            left: -2,
-            top: -2,
-            child: SizedBox(
-              width: 2,
-              height: 2,
-              child: IgnorePointer(child: WebViewWidget(controller: _speechTts!)),
             ),
           ),
       ],
