@@ -28,6 +28,7 @@ class MarkdownView extends StatefulWidget {
     this.latexEnabled = false,
     this.mermaidEnabled = false,
     this.artifactsEnabled = false,
+    this.speakBlockIndex = -1,
   });
 
   final String text;
@@ -44,8 +45,70 @@ class MarkdownView extends StatefulWidget {
   /// Artifacts（html/svg 代码块）自动预览开关
   final bool artifactsEnabled;
 
+  /// 朗读高亮：当前朗读到第几个块（splitMarkdownBlocks 的块号，
+  /// -1 = 无朗读/本气泡不在朗读）。朗读管道按同一切分函数分块，
+  /// 段→块号由播放队列映射（Kimi RawText 同思路：语音段回指原文）
+  final int speakBlockIndex;
+
   @override
   State<MarkdownView> createState() => _MarkdownViewState();
+}
+
+/// LaTeX 预处理（顶层：朗读管线与渲染共用，保证块切分输入一致）：
+/// - block 公式 `$$...$$` → fenced code block ```latex\n...\n```
+/// - inline 公式 `$...$` → inline code `LATEX:...`
+/// 正则非贪婪、不跨行（inline），避免误吞普通 $ 符号
+String preprocessLatex(String input) {
+  var out = input;
+  // block 先（$$ ... $$）
+  out = out.replaceAllMapped(
+    RegExp(r'\$\$([\s\S]+?)\$\$'),
+    (m) => '\n```latex\n${m.group(1)!.trim()}\n```\n',
+  );
+  // inline（$ ... $），不跨行、不吞已处理的 LATEX: 前缀
+  out = out.replaceAllMapped(
+    RegExp(r'(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)'),
+    (m) => '`LATEX:${m.group(1)}`',
+  );
+  return out;
+}
+
+/// 按空行切块（围栏感知）：段落/列表/表格/代码块各自成块。
+/// 朗读管道与渲染共用本切分——块号即语音段→原文的回指锚点
+///（围栏识别逻辑与 main.dart _ttsPrepText 保持一致）
+List<String> splitMarkdownBlocks(String text) {
+  final out = <String>[];
+  final buf = <String>[];
+  var inFence = false;
+  var fenceMark = '';
+  for (final line in text.split('\n')) {
+    final t = line.trimRight();
+    final fence = RegExp(r'^\s*(`{3,}|~{3,})').firstMatch(t);
+    if (fence != null) {
+      if (!inFence) {
+        inFence = true;
+        fenceMark = fence.group(1)![0];
+      } else if (t.trimLeft().startsWith(fenceMark)) {
+        inFence = false;
+      }
+      buf.add(line);
+      continue;
+    }
+    if (inFence) {
+      buf.add(line);
+      continue;
+    }
+    if (t.trim().isEmpty) {
+      if (buf.isNotEmpty) {
+        out.add(buf.join('\n'));
+        buf.clear();
+      }
+      continue;
+    }
+    buf.add(line);
+  }
+  if (buf.isNotEmpty) out.add(buf.join('\n'));
+  return out;
 }
 
 class _MarkdownViewState extends State<MarkdownView> {
@@ -62,6 +125,12 @@ class _MarkdownViewState extends State<MarkdownView> {
   String _lastFull = '';
   Timer? _trailing;
   int _lastRenderMs = 0;
+
+  /// 朗读块渲染缓存：整条消息按块缓存 MarkdownBody——朗读段切换时
+  /// 只换高亮装饰，不重解析 markdown（复用稳定前缀同款思路）
+  String? _spSource;
+  Brightness? _spBrightness;
+  List<Widget>? _spBodies;
 
   @override
   void initState() {
@@ -151,6 +220,10 @@ class _MarkdownViewState extends State<MarkdownView> {
 
   @override
   Widget build(BuildContext context) {
+    // 朗读中：按块渲染，当前块加灰底（缓存块体，段切换零重解析）
+    if (widget.speakBlockIndex >= 0) {
+      return _buildSpeaking(context);
+    }
     if (_stableText.isEmpty) {
       return widget._buildBody(context, _tailText);
     }
@@ -160,6 +233,54 @@ class _MarkdownViewState extends State<MarkdownView> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [_stableChild, widget._buildBody(context, _tailText)],
+    );
+  }
+
+  /// 朗读块渲染：每块独立 MarkdownBody（与整篇渲染等价——块边界
+  /// 即空行，markdown 结构不被割裂），高亮块包灰底圆角容器
+  Widget _buildSpeaking(BuildContext context) {
+    final theme = Theme.of(context);
+    if (_spSource != widget.text || _spBrightness != theme.brightness) {
+      _spSource = widget.text;
+      _spBrightness = theme.brightness;
+      final data = widget.latexEnabled
+          ? widget._preprocessLatex(widget.text)
+          : (widget.text.isEmpty ? ' ' : widget.text);
+      final blocks = splitMarkdownBlocks(data);
+      _spBodies = blocks
+          .map((b) => RepaintBoundary(child: widget._buildBody(context, b)))
+          .toList();
+    }
+    final bodies = _spBodies!;
+    final hi = widget.speakBlockIndex < bodies.length
+        ? widget.speakBlockIndex
+        : -1;
+    final hlColor = theme.brightness == Brightness.dark
+        ? Colors.white.withValues(alpha: 0.10)
+        : Colors.black.withValues(alpha: 0.07);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (var i = 0; i < bodies.length; i++) ...[
+          if (i > 0) const SizedBox(height: 8),
+          if (i == hi)
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: hlColor,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 6,
+                  vertical: 3,
+                ),
+                child: bodies[i],
+              ),
+            )
+          else
+            bodies[i],
+        ],
+      ],
     );
   }
 }
@@ -276,20 +397,7 @@ extension _MarkdownViewRender on MarkdownView {
   /// - block 公式 `$$...$$` → fenced code block ```latex\n...\n```
   /// - inline 公式 `$...$` → inline code `LATEX:...`
   /// 正则非贪婪、不跨行（inline），避免误吞普通 $ 符号
-  String _preprocessLatex(String input) {
-    var out = input;
-    // block 先（$$ ... $$）
-    out = out.replaceAllMapped(
-      RegExp(r'\$\$([\s\S]+?)\$\$'),
-      (m) => '\n```latex\n${m.group(1)!.trim()}\n```\n',
-    );
-    // inline（$ ... $），不跨行、不吞已处理的 LATEX: 前缀
-    out = out.replaceAllMapped(
-      RegExp(r'(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)'),
-      (m) => '`LATEX:${m.group(1)}`',
-    );
-    return out;
-  }
+  String _preprocessLatex(String input) => preprocessLatex(input);
 
   /// 打开链接（仅 http/https）：应用内浏览器打开（Via 思路：复用
   /// 系统 WebView，零额外体积），不再跳出应用

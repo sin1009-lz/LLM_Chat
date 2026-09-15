@@ -458,6 +458,20 @@ class _HomePageState extends State<HomePage>
   /// 正在朗读的消息对象（null = 空闲）；同屏仅一条在播
   Message? _speakingMsg;
 
+  /// 朗读中分段定位（null = 无朗读）：(消息, 当前段索引, 段→块号映射)。
+  /// 播放队列 currentIndex 驱动；气泡按块号给对应原文块加灰底
+  ///（块 = splitMarkdownBlocks 切分，与渲染共用同一函数）
+  (Message, int, List<int>)? _speakingSeg;
+
+  /// 消息 m 当前朗读到的块号（无朗读/越界返回 -1）——气泡传给
+  /// MarkdownView 做灰底高亮
+  int _speakBlockOf(Message m) {
+    final s = _speakingSeg;
+    if (s == null || !identical(s.$1, m)) return -1;
+    if (s.$2 < 0 || s.$2 >= s.$3.length) return -1;
+    return s.$3[s.$2];
+  }
+
   /// 朗读会话号：停止/切消息时自增——旧管道据此自杀
   int _speakSession = 0;
 
@@ -479,6 +493,7 @@ class _HomePageState extends State<HomePage>
   Future<void> _stopSpeaking() async {
     if (_speakingMsg == null) return;
     _speakingMsg = null;
+    _speakingSeg = null;
     _speakSession++;
     _audioPlayer?.stop();
     if (mounted) setState(() {});
@@ -486,20 +501,37 @@ class _HomePageState extends State<HomePage>
 
   /// Edge TTS 朗读（免密钥）
   Future<void> _speakViaEdge(Message m) async {
-    final text = _ttsPrepText(applyDisplayRules(m.content, _replaceRules));
-    if (text.isEmpty) return;
-    final segs = _splitForTts(text, maxTotal: 3000);
+    final (segs, segBlocks) = _speakSegments(_displayCached(m.displayContent));
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
     final voice = _general.ttsVoice.trim().isEmpty
         ? 'zh-CN-XiaoxiaoNeural'
         : _general.ttsVoice.trim();
-    await _speakQueue(segs, (seg) => EdgeTts.synth(
+    await _speakQueue(m, segs, segBlocks, (seg) => EdgeTts.synth(
           seg,
           rate: _general.ttsSpeed,
           voice: voice,
         ));
+  }
+
+  /// 朗读分段（块对齐，Kimi RawText 同思路）：显示文本 → LaTeX 预处理
+  ///（与渲染一致）→ 按空行切块 → 每块独立 TTS 预处理 + 句级分段，
+  /// 每段携带来源块号——播放到某段时按块号高亮气泡对应原文块
+  (List<String>, List<int>) _speakSegments(String display) {
+    final data = _general.latexEnabled ? preprocessLatex(display) : display;
+    final blocks = splitMarkdownBlocks(data);
+    final segs = <String>[];
+    final segBlocks = <int>[];
+    for (var b = 0; b < blocks.length; b++) {
+      final tts = _ttsPrepText(blocks[b]);
+      if (tts.isEmpty) continue;
+      for (final s in _splitForTts(tts, maxTotal: 3000)) {
+        segs.add(s);
+        segBlocks.add(b);
+      }
+    }
+    return (segs, segBlocks);
   }
 
   /// 播放队列（Kimi/ExoPlayer 同款）：单播放器 + ConcatenatingAudioSource
@@ -507,7 +539,9 @@ class _HomePageState extends State<HomePage>
   ///（框架级 gapless，替代手搓双播放器/信号竞速，重音与卡顿同源消除）。
   /// 会话号防旧管道；synth 抛错 → 停播 + 提示
   Future<void> _speakQueue(
+    Message m,
     List<String> segs,
+    List<int> segBlocks,
     Future<Uint8List> Function(String) synth,
   ) async {
     final session = _speakSession;
@@ -517,6 +551,12 @@ class _HomePageState extends State<HomePage>
       children: [_BytesAudioSource(await synth(segs[0]))],
     );
     await player.setAudioSource(playlist, initialIndex: 0);
+    // 分段定位：队列播到哪段 → 气泡里对应块加灰底
+    final segSub = player.currentIndexStream.listen((idx) {
+      if (session != _speakSession || idx == null || mounted == false) return;
+      setState(() => _speakingSeg = (m, idx, segBlocks));
+    });
+    setState(() => _speakingSeg = (m, 0, segBlocks));
     // 后台喂队列：边播边把后续段落追加进播放列表
     unawaited(
       () async {
@@ -553,6 +593,11 @@ class _HomePageState extends State<HomePage>
       await player.stop();
     } finally {
       await sub.cancel();
+      await segSub.cancel();
+      if (session == _speakSession && _speakingSeg?.$1 == m) {
+        _speakingSeg = null;
+        if (mounted) setState(() {});
+      }
     }
   }
 
@@ -572,13 +617,11 @@ class _HomePageState extends State<HomePage>
       _toast('未配置语音 API 地址（设置 → 语音朗读）');
       return;
     }
-    final text = _ttsPrepText(applyDisplayRules(m.content, _replaceRules));
-    if (text.isEmpty) return;
-    final segs = _splitForTts(text, maxTotal: 3000);
+    final (segs, segBlocks) = _speakSegments(_displayCached(m.displayContent));
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
-    await _speakQueue(segs, _synthSegment);
+    await _speakQueue(m, segs, segBlocks, _synthSegment);
   }
 
   /// 合成一小段（OpenAI 兼容 /audio/speech → MP3 字节）
@@ -6096,6 +6139,7 @@ class _HomePageState extends State<HomePage>
                               latexEnabled: _general.latexEnabled,
                               mermaidEnabled: _general.mermaidEnabled,
                               artifactsEnabled: _general.artifactsEnabled,
+                              speakBlockIndex: _speakBlockOf(m),
                             )
                           : SelectableText(
                               _displayCached(m.displayContent),
@@ -7301,6 +7345,7 @@ class _HomePageState extends State<HomePage>
                   latexEnabled: _general.latexEnabled,
                   mermaidEnabled: _general.mermaidEnabled,
                   artifactsEnabled: _general.artifactsEnabled,
+                  speakBlockIndex: _speakBlockOf(m),
                 )
               : SelectableText(
                   _displayCached(m.displayContent),
@@ -11341,11 +11386,19 @@ Uint8List _b64ToBytes(String dataUrl) {
   return base64Decode(comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl);
 }
 
-/// 内存音频源（API 返回的 MP3 字节直接播放，不落盘）
+/// 内存音频源（合成字节直接播放，不落盘）。contentType 按魔数嗅探：
+/// Kotlin 裁静音成功为 WAV（RIFF），解码失败回退原 MP3——两类段
+/// 混排同一队列，声明错类型会被 ExoPlayer 按错格式解析而中断（吞段落）
 class _BytesAudioSource extends StreamAudioSource {
   _BytesAudioSource(this._bytes);
 
   final Uint8List _bytes;
+
+  String get _mime => _bytes.length >= 4 &&
+          _bytes[0] == 0x52 && _bytes[1] == 0x49 &&
+          _bytes[2] == 0x46 && _bytes[3] == 0x46
+      ? 'audio/wav'
+      : 'audio/mpeg';
 
   @override
   Future<StreamAudioResponse> request([int? start, int? end]) async =>
@@ -11354,7 +11407,7 @@ class _BytesAudioSource extends StreamAudioSource {
         contentLength: (end ?? _bytes.length) - (start ?? 0),
         offset: start ?? 0,
         stream: Stream.value(_bytes.sublist(start ?? 0, end ?? _bytes.length)),
-        contentType: 'audio/mpeg',
+        contentType: _mime,
       );
 }
 
