@@ -516,7 +516,7 @@ class _HomePageState extends State<HomePage>
           );
         }
         await player.setAudioSource(_BytesAudioSource(bytes));
-        await player.play();
+        await _playSegmentToCompletion(player);
       }
     } catch (e) {
       // ignore: avoid_print
@@ -564,8 +564,7 @@ class _HomePageState extends State<HomePage>
           prefetch = _synthSegment(segs[i + 1]);
         }
         await player.setAudioSource(_BytesAudioSource(bytes));
-        // play() 的 Future 在本段播完时完成（衔接下一段）
-        await player.play();
+        await _playSegmentToCompletion(player);
       }
     } catch (e) {
       if (session == _speakSession) {
@@ -11340,6 +11339,27 @@ Uint8List _b64ToBytes(String dataUrl) {
 }
 
 /// 内存音频源（API 返回的 MP3 字节直接播放，不落盘）
+/// 播完一段音频：play() 的 Future 在音频焦点被夺/MP3 时长未知时
+/// 可能提前完成（下一段顶掉未播完的上段 = 分段互相截断）——
+/// 改等 processingState == completed（真播放完成）
+Future<void> _playSegmentToCompletion(AudioPlayer player) async {
+  final finished = Completer<void>();
+  late final StreamSubscription<ProcessingState> sub;
+  sub = player.processingStateStream.listen((st) {
+    if (st == ProcessingState.completed && !finished.isCompleted) {
+      finished.complete();
+    }
+  });
+  try {
+    await player.play();
+    // play() 提前返回（焦点/中断）：completed 事件兜底等真播完
+    if (player.processingState == ProcessingState.completed) return;
+    await finished.future;
+  } finally {
+    await sub.cancel();
+  }
+}
+
 class _BytesAudioSource extends StreamAudioSource {
   _BytesAudioSource(this._bytes);
 
