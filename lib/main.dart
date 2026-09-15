@@ -724,7 +724,9 @@ class _HomePageState extends State<HomePage>
     var total = 0;
     void flush() {
       final t = buf.trim();
-      if (t.isNotEmpty && total < maxTotal) {
+      // 不设总量上限：每段独立合成/请求，攒满即弃会让长文读到
+      // 一半静默截断（"读到一半莫名其妙截断"的根因）
+      if (t.isNotEmpty) {
         out.add(t);
         total += t.length;
       }

@@ -4424,7 +4424,58 @@ class _TtsSettingsPageState extends State<_TtsSettingsPage> {
             enabled: _s.ttsEnabled,
             onChanged: (v) => _update((s) => s.copyWith(ttsUseApi: v)),
           ),
+          const SizedBox(height: 12),
+          // 语速：Edge TTS（免密钥）与在线 API 共用
+          Material(
+            color: _buttonColor(context),
+            borderRadius: BorderRadius.circular(14),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  Text(
+                    '语速',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        trackHeight: 10,
+                        activeTrackColor: Colors.grey.shade700,
+                        inactiveTrackColor: Colors.grey.withValues(alpha: 0.25),
+                        thumbColor: Colors.white,
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 9,
+                        ),
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 0,
+                        ),
+                        tickMarkShape: SliderTickMarkShape.noTickMark,
+                      ),
+                      child: Slider(
+                        value: _s.ttsSpeed.clamp(0.5, 2.0),
+                        min: 0.5,
+                        max: 2.0,
+                        divisions: 6,
+                        onChanged: (v) =>
+                            _update((s) => s.copyWith(ttsSpeed: v)),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${_s.ttsSpeed.toStringAsFixed(1)}x',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
           if (_s.ttsEnabled && _s.ttsUseApi) ...[
+
             const SizedBox(height: 12),
             Material(
               color: _buttonColor(context),
@@ -4465,57 +4516,6 @@ class _TtsSettingsPageState extends State<_TtsSettingsPage> {
                       label: '音色',
                       hint: 'alex / anna / bella …（取决于服务）',
                       onChanged: (v) => _update((s) => s.copyWith(ttsVoice: v)),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Text(
-                          '语速',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                        Expanded(
-                          child: SliderTheme(
-                            data: SliderThemeData(
-                              trackHeight: 10,
-                              activeTrackColor: Colors.grey.shade700,
-                              inactiveTrackColor: Colors.grey.withValues(
-                                alpha: 0.25,
-                              ),
-                              thumbColor: Colors.white,
-                              thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 9,
-                              ),
-                              overlayShape: const RoundSliderOverlayShape(
-                                overlayRadius: 0,
-                              ),
-                              tickMarkShape: SliderTickMarkShape.noTickMark,
-                            ),
-                            child: Slider(
-                              value: _s.ttsSpeed,
-                              min: 0.5,
-                              max: 2.0,
-                              divisions: 6,
-                              label: '${_s.ttsSpeed.toStringAsFixed(2)}x',
-                              onChanged: (v) =>
-                                  _update((s) => s.copyWith(ttsSpeed: v)),
-                            ),
-                          ),
-                        ),
-                        Text(
-                          '${_s.ttsSpeed.toStringAsFixed(2)}x',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                      ],
                     ),
                   ],
                 ),
