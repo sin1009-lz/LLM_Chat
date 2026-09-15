@@ -520,7 +520,9 @@ class _HomePageState extends State<HomePage>
   /// 合成请求**——句间距在单次合成内部由韵律引擎产生，天然统一；
   /// 请求边界只落在段落处（天然停顿，头部静音差异不可闻）。
   /// 队列项=块 → currentIndex 即块号，高亮免映射。
-  /// 超长块（罕见：整段长文/拍平大表）按句切，防单请求过大
+  /// 超长块（罕见：整段长文/拍平大表）按句切，防单请求过大——
+  /// 阈值放宽到 1200：合并后的长列表尽量保持单块（拆开=逐项请求
+  /// 的停顿感又回来了）
   (List<String>, List<int>) _speakSegments(String display) {
     final data = _general.latexEnabled ? preprocessLatex(display) : display;
     final blocks = splitMarkdownBlocks(data);
@@ -529,7 +531,7 @@ class _HomePageState extends State<HomePage>
     for (var b = 0; b < blocks.length; b++) {
       final tts = _ttsPrepText(blocks[b]);
       if (tts.isEmpty) continue;
-      if (tts.length > 800) {
+      if (tts.length > 1200) {
         for (final s in _splitForTts(tts, maxTotal: 3000)) {
           segs.add(s);
           segBlocks.add(b);
@@ -565,13 +567,28 @@ class _HomePageState extends State<HomePage>
       setState(() => _speakingSeg = (m, idx, segBlocks));
     });
     setState(() => _speakingSeg = (m, 0, segBlocks));
-    // 后台喂队列：边播边把后续段落追加进播放列表
+    // 后台喂队列：双并发预合成、严格按序入队——串行合成时短块
+    //（标题/列表项）播完而下一长块未就绪会硬停顿；并发窗口 2
+    // 兼顾 Edge 连接压力
     unawaited(
       () async {
-        for (var i = 1; i < segs.length; i++) {
-          if (session != _speakSession) return;
+        const window = 2;
+        var issued = 1;
+        var added = 1;
+        final slots = <int, Future<Uint8List>>{};
+        while (added < segs.length) {
+          while (slots.length < window && issued < segs.length) {
+            final i = issued++;
+            final f = synth(segs[i]);
+            // 错误由下方按序 await 统一处理；会话中止时未 await 的
+            // 槽位错误经 ignore 吞掉，避免未处理异步异常
+            f.ignore();
+            slots[i] = f;
+          }
+          final f = slots.remove(added);
+          if (f == null) return;
           try {
-            final bytes = await synth(segs[i]);
+            final bytes = await f;
             if (session != _speakSession) return;
             await playlist.add(_BytesAudioSource(bytes));
           } catch (e) {
@@ -581,6 +598,7 @@ class _HomePageState extends State<HomePage>
             }
             return;
           }
+          added++;
         }
       }(),
     );

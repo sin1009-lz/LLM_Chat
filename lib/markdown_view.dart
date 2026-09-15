@@ -73,15 +73,22 @@ String preprocessLatex(String input) {
   return out;
 }
 
-/// 按空行切块（围栏感知）：段落/列表/表格/代码块各自成块。
-/// 朗读管道与渲染共用本切分——块号即语音段→原文的回指锚点
-///（围栏识别逻辑与 main.dart _ttsPrepText 保持一致）
+/// 按块切分（渲染与朗读管道共用）：空行切块，围栏感知；
+/// 松散列表（空行分隔的列表项/缩进续行）不切——CommonMark 中空行
+/// 不结束列表，逐项成块会让朗读在每项后停一拍、逐项单独请求，
+/// 渲染也会拆成多个单条列表走样
 List<String> splitMarkdownBlocks(String text) {
+  final itemMark = RegExp(r'^\s{0,3}([-*+]\s|\d{1,3}[.)]\s)');
+  final indentCont = RegExp(r'^\s+\S');
+  final lines = text.split('\n');
   final out = <String>[];
   final buf = <String>[];
   var inFence = false;
   var fenceMark = '';
-  for (final line in text.split('\n')) {
+  var isList = false;
+
+  for (var li = 0; li < lines.length; li++) {
+    final line = lines[li];
     final t = line.trimRight();
     final fence = RegExp(r'^\s*(`{3,}|~{3,})').firstMatch(t);
     if (fence != null) {
@@ -99,11 +106,28 @@ List<String> splitMarkdownBlocks(String text) {
       continue;
     }
     if (t.trim().isEmpty) {
+      // 前看下一非空行：仍是列表项/缩进续行 → 空行并入当前列表块
+      var j = li + 1;
+      while (j < lines.length && lines[j].trim().isEmpty) {
+        j++;
+      }
+      final cont = j < lines.length &&
+          isList &&
+          (itemMark.hasMatch(lines[j]) || indentCont.hasMatch(lines[j]));
+      if (cont) {
+        buf.add('');
+        li = j - 1;
+        continue;
+      }
       if (buf.isNotEmpty) {
         out.add(buf.join('\n'));
         buf.clear();
+        isList = false;
       }
       continue;
+    }
+    if (buf.isEmpty) {
+      isList = itemMark.hasMatch(t);
     }
     buf.add(line);
   }
