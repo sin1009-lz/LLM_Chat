@@ -481,6 +481,7 @@ class _HomePageState extends State<HomePage>
     _speakingMsg = null;
     _speakSession++;
     _audioPlayer?.stop();
+    _ttsPlayer2?.stop();
     if (mounted) setState(() {});
   }
 
@@ -492,31 +493,38 @@ class _HomePageState extends State<HomePage>
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
-    final player = _audioPlayer ??= AudioPlayer();
-    await player.stop();
+    final players = _ttsPlayers();
+    await players[0].stop();
+    await players[1].stop();
     try {
-      var prefetch = EdgeTts.synth(
-        segs[0],
-        rate: _general.ttsSpeed,
-        voice: _general.ttsVoice.trim().isEmpty
-            ? 'zh-CN-XiaoxiaoNeural'
-            : _general.ttsVoice.trim(),
+      await players[0].setAudioSource(
+        _BytesAudioSource(await EdgeTts.synth(
+          segs[0],
+          rate: _general.ttsSpeed,
+          voice: _general.ttsVoice.trim().isEmpty
+              ? 'zh-CN-XiaoxiaoNeural'
+              : _general.ttsVoice.trim(),
+        )),
       );
+      Future<void>? nextLoad;
       for (var i = 0; i < segs.length; i++) {
         if (session != _speakSession) return;
-        final bytes = await prefetch;
-        if (session != _speakSession) return;
+        final player = players[i % 2];
+        // 下段在另一播放器预装（合成 + 解码与播放并发 → 到点即切）
         if (i + 1 < segs.length) {
-          prefetch = EdgeTts.synth(
-            segs[i + 1],
+          final ni = i + 1;
+          nextLoad = EdgeTts.synth(
+            segs[ni],
             rate: _general.ttsSpeed,
             voice: _general.ttsVoice.trim().isEmpty
                 ? 'zh-CN-XiaoxiaoNeural'
                 : _general.ttsVoice.trim(),
-          );
+          ).then((b) => players[ni % 2].setAudioSource(
+                _BytesAudioSource(b),
+              ));
         }
-        await player.setAudioSource(_BytesAudioSource(bytes));
         await _playSegmentToCompletion(player);
+        if (nextLoad != null) await nextLoad;
       }
     } catch (e) {
       // ignore: avoid_print
@@ -536,6 +544,16 @@ class _HomePageState extends State<HomePage>
   // 部分国产 ROM 上不给第三方绑定，这是主朗读方案）──
   AudioPlayer? _audioPlayer;
 
+  /// 双播放器交替（Kimi 式无间隙流水线）：A 播当前段时 B 预装
+  /// 下段（setAudioSource 完成即完成解码缓冲），A 播完立即 play
+  /// B——消除每段 MP3 解码起播的卡顿
+  AudioPlayer? _ttsPlayer2;
+  List<AudioPlayer> _ttsPlayers() {
+    final a = _audioPlayer ??= AudioPlayer();
+    final b = _ttsPlayer2 ??= AudioPlayer();
+    return [a, b];
+  }
+
   /// 伪流式朗读（Kimi 思路）：文本按语义切段，逐段合成 + 播放当前段时
   /// 预取下一段——首段几百毫秒即出声，段间几乎无感衔接。
   /// [_speakSession] 会话号：停止/切消息时自增使旧管道整体失效
@@ -551,20 +569,26 @@ class _HomePageState extends State<HomePage>
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
-    final player = _audioPlayer ??= AudioPlayer();
-    await player.stop();
+    final players = _ttsPlayers();
+    await players[0].stop();
+    await players[1].stop();
     try {
-      // 预取第 0 段；播放第 i 段期间预取第 i+1 段（流水线）
-      var prefetch = _synthSegment(segs[0]);
+      await players[0].setAudioSource(
+        _BytesAudioSource(await _synthSegment(segs[0])),
+      );
+      Future<void>? nextLoad;
       for (var i = 0; i < segs.length; i++) {
         if (session != _speakSession) return;
-        final bytes = await prefetch;
-        if (session != _speakSession) return;
+        final player = players[i % 2];
+        // 下段在另一播放器预装（合成 + 解码与播放并发 → 到点即切）
         if (i + 1 < segs.length) {
-          prefetch = _synthSegment(segs[i + 1]);
+          final ni = i + 1;
+          nextLoad = _synthSegment(segs[ni]).then(
+            (b) => players[ni % 2].setAudioSource(_BytesAudioSource(b)),
+          );
         }
-        await player.setAudioSource(_BytesAudioSource(bytes));
         await _playSegmentToCompletion(player);
+        if (nextLoad != null) await nextLoad;
       }
     } catch (e) {
       if (session == _speakSession) {

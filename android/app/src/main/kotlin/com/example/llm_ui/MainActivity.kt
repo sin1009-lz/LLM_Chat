@@ -84,6 +84,12 @@ class MainActivity : FlutterActivity() {
 
             val wsListener = object : WebSocketListener() {
                 private var opened = false
+                // 一次性回复守卫：turn.end 已 success 后，关闭/失败回调
+                // 再触发 result.* 会抛 Reply already submitted 崩溃
+                private val answered = java.util.concurrent.atomic.AtomicBoolean(false)
+                private fun replyOnce(body: () -> Unit) {
+                    if (answered.compareAndSet(false, true)) body()
+                }
 
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     opened = true
@@ -123,14 +129,18 @@ class MainActivity : FlutterActivity() {
                         webSocket.close(1000, null)
                         val bytes = audio.toByteArray()
                         main.post {
-                            if (bytes.isEmpty()) result.error("empty", "no audio", null)
-                            else result.success(bytes.toByteString().toByteArray())
+                            replyOnce {
+                                if (bytes.isEmpty()) result.error("empty", "no audio", null)
+                                else result.success(bytes.toByteString().toByteArray())
+                            }
                         }
                     }
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    main.post { result.error("ws", t.message ?: "fail", null) }
+                    main.post {
+                        replyOnce { result.error("ws", t.message ?: "fail", null) }
+                    }
                 }
             }
             client.newWebSocket(req, wsListener)
