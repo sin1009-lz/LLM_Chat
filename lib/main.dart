@@ -705,6 +705,7 @@ class _HomePageState extends State<HomePage>
       '${String.fromCharCode(0xFE0F)}'
       '${String.fromCharCode(0x200D)}'
       ']',
+      unicode: true,
     );
     x = x.replaceAll(emoji, '');
     return x.trim();
