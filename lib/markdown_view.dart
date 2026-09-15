@@ -30,6 +30,7 @@ class MarkdownView extends StatefulWidget {
     this.artifactsEnabled = false,
     this.speakBlockIndex = -1,
     this.speakSentenceIndex = -1,
+    this.onSpeakSentenceTap,
   });
 
   final String text;
@@ -55,6 +56,10 @@ class MarkdownView extends StatefulWidget {
   /// -1 = 整块高亮/非散文块/无词时间戳）。句片静态切分、缓存复用，
   /// 高亮移动只换装饰不重排
   final int speakSentenceIndex;
+
+  /// 点句跳读（仅朗读渲染路径使用）：点击 (块号, 句号) 跳到该句
+  /// 继续朗读；句号 -1 = 跳到块开头。点击已读/未读句均可
+  final void Function(int block, int sentence)? onSpeakSentenceTap;
 
   @override
   State<MarkdownView> createState() => _MarkdownViewState();
@@ -415,7 +420,17 @@ class _MarkdownViewState extends State<MarkdownView> {
           child: child,
         );
 
-    // 句级高亮：句片铺开，当前句整条灰底（句片零间隙=段落视觉连续）
+    // 句级高亮：句片铺开，当前句整条灰底（句片零间隙=段落视觉连续）。
+    // 点句跳读：句片/块均可点（GestureDetector 包裹不改变布局）
+    final tap = widget.onSpeakSentenceTap;
+    Widget tappable(int i, int sentence, Widget child) => tap == null
+        ? child
+        : GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => tap(i, sentence),
+            child: child,
+          );
+
     Widget sentenceHighlight(int i) {
       final sentences = _spSentences[i];
       final si = widget.speakSentenceIndex;
@@ -424,11 +439,11 @@ class _MarkdownViewState extends State<MarkdownView> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             for (var s = 0; s < sentences.length; s++)
-              if (s == si) band(sentences[s]) else sentences[s],
+              tappable(i, s, s == si ? band(sentences[s]) : sentences[s]),
           ],
         );
       }
-      return band(bodies[i]);
+      return tappable(i, -1, band(bodies[i]));
     }
 
     return Column(
@@ -436,7 +451,10 @@ class _MarkdownViewState extends State<MarkdownView> {
       children: [
         for (var i = 0; i < bodies.length; i++) ...[
           if (i > 0) const SizedBox(height: 8),
-          if (i == hi) sentenceHighlight(i) else bodies[i],
+          if (i == hi)
+            sentenceHighlight(i)
+          else
+            tappable(i, -1, bodies[i]),
         ],
       ],
     );

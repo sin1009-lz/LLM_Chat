@@ -464,8 +464,31 @@ class _HomePageState extends State<HomePage>
   (Message, int, List<int>)? _speakingSeg;
 
   /// 句级高亮：当前块内读到第几句（-1 = 整块高亮/非散文块/无词戳）。
-  /// 播放位置 → WordBoundary 词 → 词流对齐回显示文本句子
+  /// 播放位置 → WordBoundary 词 → 词流对齐回显示句子
   int _speakingSent = -1;
+
+  /// 点句跳读查找（朗读期间由 _speakQueue 装配）：
+  /// (块号, 句号) → (队列项, 该句首词 ms)。句号 -1 = 块开头；
+  /// 会话过期/块无队列项/对不上的句子返回 null（静默忽略）
+  (int, int)? Function(int block, int sentence)? _speakSeek;
+
+  /// 点句跳读：点击朗读中的句片/块 → seek 到对应队列项与时间点。
+  /// 队列项未合成入队时（双并发窗口还没追上）跳过——顺序播放会到
+  void _onSpeakSentenceTap(int block, int sentence) {
+    final t = _speakSeek?.call(block, sentence);
+    if (t == null) return;
+    final player = _audioPlayer;
+    if (player == null) return;
+    if (t.$1 >= (player.sequence?.length ?? 0)) return;
+    unawaited(
+      () async {
+        try {
+          await player.seek(Duration(milliseconds: t.$2), index: t.$1);
+          if (!player.playing) await player.play();
+        } catch (_) {}
+      }(),
+    );
+  }
 
   /// 消息 m 当前朗读到的块号（无朗读/越界返回 -1）——气泡传给
   /// MarkdownView 做灰底高亮
@@ -503,6 +526,7 @@ class _HomePageState extends State<HomePage>
     _speakingMsg = null;
     _speakingSeg = null;
     _speakingSent = -1;
+    _speakSeek = null;
     _speakSession++;
     _audioPlayer?.stop();
     if (mounted) setState(() {});
@@ -641,6 +665,25 @@ class _HomePageState extends State<HomePage>
           }
           return _sentenceStartWords(sentences, words);
         });
+    // 点句跳读查找表：块+句 → 队列项+首词时间（会话过期自守卫）
+    _speakSeek = (block, sentence) {
+      if (session != _speakSession) return null;
+      var item = -1;
+      for (var i = 0; i < segBlocks.length; i++) {
+        if (segBlocks[i] == block) {
+          item = i;
+          break;
+        }
+      }
+      if (item < 0) return null;
+      if (sentence < 0) return (item, 0);
+      final starts = startsFor(item);
+      if (sentence >= starts.length) return null;
+      final w = starts[sentence];
+      final words = itemWords[item];
+      if (w < 0 || words == null || w >= words.length) return null;
+      return (item, words[w].startMs);
+    };
     // 分段定位：队列播到哪段 → 气泡里对应块加灰底
     var curIdx = 0;
     final segSub = player.currentIndexStream.listen((idx) {
@@ -750,6 +793,7 @@ class _HomePageState extends State<HomePage>
       await sub.cancel();
       await segSub.cancel();
       await posSub.cancel();
+      _speakSeek = null;
       if (session == _speakSession && _speakingSeg?.$1 == m) {
         _speakingSeg = null;
         _speakingSent = -1;
@@ -6306,6 +6350,7 @@ class _HomePageState extends State<HomePage>
                               artifactsEnabled: _general.artifactsEnabled,
                               speakBlockIndex: _speakBlockOf(m),
                               speakSentenceIndex: _speakSentenceOf(m),
+                              onSpeakSentenceTap: _onSpeakSentenceTap,
                             )
                           : SelectableText(
                               _displayCached(m.displayContent),
@@ -7513,6 +7558,7 @@ class _HomePageState extends State<HomePage>
                   artifactsEnabled: _general.artifactsEnabled,
                   speakBlockIndex: _speakBlockOf(m),
                   speakSentenceIndex: _speakSentenceOf(m),
+                  onSpeakSentenceTap: _onSpeakSentenceTap,
                 )
               : SelectableText(
                   _displayCached(m.displayContent),
