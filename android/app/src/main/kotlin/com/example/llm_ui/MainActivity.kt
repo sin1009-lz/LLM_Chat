@@ -128,10 +128,15 @@ class MainActivity : FlutterActivity() {
                     if (text.contains("Path:turn.end")) {
                         webSocket.close(1000, null)
                         val bytes = audio.toByteArray()
+                        // 段间统一的关键：MP3 每段带编码器 delay/padding
+                        //（~26ms 头静音 + 尾填充）+ 合成自身的前导静音——
+                        // 队列边界间距参差不齐。解码到 PCM 裁掉首尾静音后
+                        // 输出 WAV（零编码器填充），段间距归一
+                        val wav = try { mp3ToTrimmedWav(bytes) } catch (e: Exception) { null }
                         main.post {
                             replyOnce {
                                 if (bytes.isEmpty()) result.error("empty", "no audio", null)
-                                else result.success(bytes.toByteString().toByteArray())
+                                else result.success(wav ?: bytes)
                             }
                         }
                     }
@@ -147,5 +152,105 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             main.post { result.error("err", e.message, null) }
         }
+    }
+
+    // ── MP3 → 裁静音 WAV（段间距归一）──
+    // MP3 帧边界带编码器 delay/padding 静音；合成也可能带前导静音。
+    // 解码成 PCM16 后按振幅阈值裁首尾（保留 20ms 缓冲），封 WAV 头
+    // ——WAV 无填充，队列衔接自然紧
+    private fun mp3ToTrimmedWav(mp3: ByteArray): ByteArray? {
+        val tmp = java.io.File.createTempFile("tts", ".mp3", cacheDir)
+        try {
+            tmp.writeBytes(mp3)
+            val extractor = android.media.MediaExtractor()
+            extractor.setDataSource(tmp.absolutePath)
+            val fmt = extractor.getTrackFormat(0)
+            val sampleRate = fmt.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+            val channels = fmt.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+            extractor.selectTrack(0)
+            val codec = android.media.MediaCodec.createDecoderByType(fmt.getString(android.media.MediaFormat.KEY_MIME) ?: "audio/mpeg")
+            codec.configure(fmt, null, null, 0)
+            codec.start()
+            val pcm = java.io.ByteArrayOutputStream()
+            val info = android.media.MediaCodec.BufferInfo()
+            var sawInputEOS = false
+            var sawOutputEOS = false
+            while (!sawOutputEOS) {
+                if (!sawInputEOS) {
+                    val inIdx = codec.dequeueInputBuffer(10000)
+                    if (inIdx >= 0) {
+                        val buf = codec.getInputBuffer(inIdx)!!
+                        val sz = extractor.readSampleData(buf, 0)
+                        if (sz < 0) {
+                            codec.queueInputBuffer(inIdx, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            sawInputEOS = true
+                        } else {
+                            codec.queueInputBuffer(inIdx, 0, sz, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+                val outIdx = codec.dequeueOutputBuffer(info, 10000)
+                if (outIdx >= 0) {
+                    val out = codec.getOutputBuffer(outIdx)!!
+                    val bytes = ByteArray(info.size)
+                    out.get(bytes)
+                    pcm.write(bytes)
+                    codec.releaseOutputBuffer(outIdx, false)
+                    if (info.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) sawOutputEOS = true
+                }
+            }
+            codec.stop(); codec.release(); extractor.release()
+            return trimSilenceToWav(pcm.toByteArray(), sampleRate, channels)
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    /// PCM16 立体声可能（这里单声道）：按 16bit 采样幅值裁首尾静音，
+    /// 阈值 ≈ -46dB（振幅 250），各留 20ms 缓冲；封 44 字节 WAV 头
+    private fun trimSilenceToWav(pcm: ByteArray, sampleRate: Int, channels: Int): ByteArray? {
+        if (pcm.size < 4) return null
+        // 16bit 交错 → 绝对幅值序列
+        val totalSamples = pcm.size / 2
+        val amp = ShortArray(totalSamples)
+        var peak: Int = 1
+        java.nio.ByteBuffer.wrap(pcm).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(amp)
+        for (a in amp) { val v = if (a < 0) -a.toInt() else a.toInt(); if (v > peak) peak = v }
+        val threshold = (peak * 0.005).toInt().coerceAtLeast(60)  // 峰值 0.5% 且 ≥60
+        val winMs = 20
+        val win = (sampleRate * winMs / 1000).coerceAtLeast(1)
+        // 首：连续 win 样本超阈值的首个位置
+        var start = 0
+        run {
+            var run = 0
+            for (i in amp.indices) {
+                val v = if (amp[i] < 0) -amp[i].toInt() else amp[i].toInt()
+                run = if (v > threshold) run + 1 else 0
+                if (run >= win) { start = (i - win + 1).coerceAtLeast(0); break }
+            }
+        }
+        var end = totalSamples
+        run {
+            var run = 0
+            for (i in amp.indices.reversed()) {
+                val v = if (amp[i] < 0) -amp[i].toInt() else amp[i].toInt()
+                run = if (v > threshold) run + 1 else 0
+                if (run >= win) { end = (i + win).coerceAtMost(totalSamples); break }
+            }
+        }
+        if (end <= start) return null
+        val trimmed = pcm.copyOfRange(start * 2, end * 2)
+        // WAV 头（PCM16）
+        val byteRate = sampleRate * channels * 2
+        val out = java.io.ByteArrayOutputStream(44 + trimmed.size)
+        val h = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        h.put("RIFF".toByteArray()); h.putInt(36 + trimmed.size)
+        h.put("WAVE".toByteArray()); h.put("fmt ".toByteArray()); h.putInt(16)
+        h.putShort(1); h.putShort(channels.toShort()); h.putInt(sampleRate); h.putInt(byteRate)
+        h.putShort((channels * 2).toShort()); h.putShort(16)
+        h.put("data".toByteArray()); h.putInt(trimmed.size)
+        out.write(h.array()); out.write(trimmed)
+        return out.toByteArray()
     }
 }
