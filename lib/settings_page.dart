@@ -3502,168 +3502,69 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                     _update((s) => s.copyWith(quickNavEnabled: v)),
               ),
               const SizedBox(height: 12),
-              // 图片压缩：开关 + 目标像素滑条合并一张卡
-              Material(
-                color: _buttonColor(context),
-                borderRadius: BorderRadius.circular(14),
-                clipBehavior: Clip.antiAlias,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(left: 2),
-                      child: Row(
-                        children: [
-                          // 点文字区切换；Switch 独立兄弟节点（同区域
-                          // 双手势会双触发互相抵消 = 开关失灵）
-                          Expanded(
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(12),
-                              onTap: () => _update(
-                                (s) => s.copyWith(
-                                  imageCompressEnabled:
-                                      !_s.imageCompressEnabled,
-                                ),
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 12,
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      Icons.photo_size_select_large_outlined,
-                                      size: 20,
-                                      color: Theme.of(
-                                        context,
-                                      ).colorScheme.onSurfaceVariant,
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            '发送图片压缩',
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodyMedium?.copyWith(
-                                              fontWeight: FontWeight.w500,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 2),
-                                          Text(
-                                            _s.imageCompressEnabled
-                                                ? '限制发送图片的目标像素（llama.cpp 同款）'
-                                                : '关闭后原图直传（仍受 4MB / 8192px 校验）',
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodySmall?.copyWith(
-                                              color: Theme.of(
-                                                context,
-                                              ).colorScheme.onSurfaceVariant,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
+              _switchTile(
+                context,
+                icon: Icons.photo_size_select_large_outlined,
+                title: '发送图片压缩',
+                subtitle: '压缩发送图片，降低流量与 token 消耗',
+                value: _s.imageCompressEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(imageCompressEnabled: v)),
+              ),
+              if (_s.imageCompressEnabled)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+                  child: Row(
+                    children: [
+                      Text(
+                        '目标像素',
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
                             ),
-                          ),
-                          Switch(
-                            value: _s.imageCompressEnabled,
-                            onChanged: (v) => _update(
-                              (s) => s.copyWith(imageCompressEnabled: v),
-                            ),
-                          ),
-                        ],
                       ),
-                    ),
-                    if (_s.imageCompressEnabled)
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
-                        child: Row(
-                          children: [
-                            Text(
-                              '目标像素',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.onSurfaceVariant,
-                                  ),
+                      Expanded(
+                        child: SliderTheme(
+                          data: SliderThemeData(
+                            trackHeight: 10,
+                            activeTrackColor: Colors.grey.shade700,
+                            inactiveTrackColor: Colors.grey.withValues(
+                              alpha: 0.25,
                             ),
-                            Expanded(
-                              child: SliderTheme(
-                                data: SliderThemeData(
-                                  trackHeight: 10,
-                                  activeTrackColor: Colors.grey.shade700,
-                                  inactiveTrackColor: Colors.grey.withValues(
-                                    alpha: 0.25,
-                                  ),
-                                  thumbColor: Colors.white,
-                                  thumbShape: const RoundSliderThumbShape(
-                                    enabledThumbRadius: 9,
-                                  ),
-                                  overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 0,
-                                  ),
-                                  tickMarkShape: SliderTickMarkShape.noTickMark,
-                                ),
-                                child: Slider(
-                                  value: _s.imageMaxMegapixels.clamp(
-                                    0.5,
-                                    12.0,
-                                  ),
-                                  min: 0.5,
-                                  max: 12.0,
-                                  divisions: 23,
-                                  onChanged: (v) => _update(
-                                    (s) => s.copyWith(imageMaxMegapixels: v),
-                                  ),
-                                ),
-                              ),
+                            thumbColor: Colors.white,
+                            thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 9,
                             ),
-                            Text(
-                              '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.onSurfaceVariant,
-                                  ),
+                            overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 0,
                             ),
-                          ],
+                            tickMarkShape: SliderTickMarkShape.noTickMark,
+                          ),
+                          child: Slider(
+                            value: _s.imageMaxMegapixels.clamp(0.5, 12.0),
+                            min: 0.5,
+                            max: 12.0,
+                            divisions: 23,
+                            onChanged: (v) => _update(
+                              (s) => s.copyWith(imageMaxMegapixels: v),
+                            ),
+                          ),
                         ),
                       ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(
-                  '模型自主调用工具（搜索/时间/位置/MCP）的最大迭代轮数；'
-                  '上限越高模型可进行更多轮搜索，同时消耗更多 token。',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      Text(
+                        '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(
-                  '可在输入栏加号面板中按对话单独开启/关闭内置工具。',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
               const SizedBox(height: 12),
 
               // ── 渲染 ──
@@ -3792,27 +3693,6 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                 ),
               ),
               const SizedBox(height: 12),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(
-                  '模型自主调用工具（搜索/时间/位置/MCP）的最大迭代轮数；'
-                  '上限越高模型可进行更多轮搜索，同时消耗更多 token。',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(
-                  '可在输入栏加号面板中按对话单独开启/关闭内置工具。',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
 
               // ── 归档 ──
               _sectionLabel('数据管理'),
