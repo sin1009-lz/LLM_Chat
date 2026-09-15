@@ -11343,18 +11343,24 @@ Uint8List _b64ToBytes(String dataUrl) {
 /// 可能提前完成（下一段顶掉未播完的上段 = 分段互相截断）——
 /// 改等 processingState == completed（真播放完成）
 Future<void> _playSegmentToCompletion(AudioPlayer player) async {
+  var completed = false;
   final finished = Completer<void>();
   late final StreamSubscription<ProcessingState> sub;
   sub = player.processingStateStream.listen((st) {
-    if (st == ProcessingState.completed && !finished.isCompleted) {
-      finished.complete();
+    if (st == ProcessingState.completed) {
+      completed = true;
+      if (!finished.isCompleted) finished.complete();
     }
   });
   try {
-    await player.play();
-    // play() 提前返回（焦点/中断）：completed 事件兜底等真播完
-    if (player.processingState == ProcessingState.completed) return;
-    await finished.future;
+    final playFuture = player.play();
+    // 三路会合：play() 完成 / completed 事件 / 双保险——谁先真完成
+    // 谁放行。play() 完成但 completed 未到（提前返回）：再等事件；
+    // completed 先到（事件快于 Future）：立即放行衔接下一段
+    await playFuture.whenComplete(() {
+      if (completed && !finished.isCompleted) finished.complete();
+    });
+    if (!completed) await finished.future;
   } finally {
     await sub.cancel();
   }
