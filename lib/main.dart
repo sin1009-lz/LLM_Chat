@@ -481,11 +481,10 @@ class _HomePageState extends State<HomePage>
     _speakingMsg = null;
     _speakSession++;
     _audioPlayer?.stop();
-    _ttsPlayer2?.stop();
     if (mounted) setState(() {});
   }
 
-  /// Edge TTS 朗读（免密钥）：复用伪流式管道（分段合成 + 预取）
+  /// Edge TTS 朗读（免密钥）
   Future<void> _speakViaEdge(Message m) async {
     final text = _ttsPrepText(applyDisplayRules(m.content, _replaceRules));
     if (text.isEmpty) return;
@@ -493,50 +492,67 @@ class _HomePageState extends State<HomePage>
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
-    final players = _ttsPlayers();
-    await players[0].stop();
-    await players[1].stop();
-    try {
-      await players[0].setAudioSource(
-        _BytesAudioSource(await EdgeTts.synth(
-          segs[0],
+    final voice = _general.ttsVoice.trim().isEmpty
+        ? 'zh-CN-XiaoxiaoNeural'
+        : _general.ttsVoice.trim();
+    await _speakQueue(segs, (seg) => EdgeTts.synth(
+          seg,
           rate: _general.ttsSpeed,
-          voice: _general.ttsVoice.trim().isEmpty
-              ? 'zh-CN-XiaoxiaoNeural'
-              : _general.ttsVoice.trim(),
-        )),
-      );
-      Future<void>? nextLoad;
-      for (var i = 0; i < segs.length; i++) {
-        if (session != _speakSession) return;
-        final player = players[i % 2];
-        // 下段在另一播放器预装（合成 + 解码与播放并发 → 到点即切）
-        if (i + 1 < segs.length) {
-          final ni = i + 1;
-          nextLoad = EdgeTts.synth(
-            segs[ni],
-            rate: _general.ttsSpeed,
-            voice: _general.ttsVoice.trim().isEmpty
-                ? 'zh-CN-XiaoxiaoNeural'
-                : _general.ttsVoice.trim(),
-          ).then((b) => players[ni % 2].setAudioSource(
-                _BytesAudioSource(b),
-              ));
+          voice: voice,
+        ));
+  }
+
+  /// 播放队列（Kimi/ExoPlayer 同款）：单播放器 + ConcatenatingAudioSource
+  /// 动态追加——合成一段挂一段，播放器在当前段结束前自动预缓冲下一段
+  ///（框架级 gapless，替代手搓双播放器/信号竞速，重音与卡顿同源消除）。
+  /// 会话号防旧管道；synth 抛错 → 停播 + 提示
+  Future<void> _speakQueue(
+    List<String> segs,
+    Future<Uint8List> Function(String) synth,
+  ) async {
+    final session = _speakSession;
+    final player = _audioPlayer ??= AudioPlayer();
+    await player.stop();
+    final playlist = ConcatenatingAudioSource(
+      children: [_BytesAudioSource(await synth(segs[0]))],
+    );
+    await player.setAudioSource(playlist, initialIndex: 0);
+    // 后台喂队列：边播边把后续段落追加进播放列表
+    unawaited(
+      () async {
+        for (var i = 1; i < segs.length; i++) {
+          if (session != _speakSession) return;
+          try {
+            final bytes = await synth(segs[i]);
+            if (session != _speakSession) return;
+            await playlist.add(_BytesAudioSource(bytes));
+          } catch (e) {
+            if (session == _speakSession) {
+              _toast('语音合成失败：$e');
+              await player.stop();
+            }
+            return;
+          }
         }
-        await _playSegmentToCompletion(player);
-        if (nextLoad != null) await nextLoad;
+      }(),
+    );
+    // 等整个队列播完：completed（全部段播毕）或 idle（被停止）
+    final done = Completer<void>();
+    late final StreamSubscription<ProcessingState> sub;
+    sub = player.processingStateStream.listen((st) {
+      if (st == ProcessingState.completed || st == ProcessingState.idle) {
+        if (!done.isCompleted) done.complete();
       }
-    } catch (e) {
-      // ignore: avoid_print
-      print('TTSDIAG ${e.toString()}');
-      if (session == _speakSession) {
-        _toast('免费语音失败：$e');
-      }
+    });
+    try {
+      unawaited(player.play());
+      // 兜底超时：段数 × 每段上限时长 + 缓冲，防异常挂死
+      final timeoutMs = 60 + segs.length * 60;
+      await done.future.timeout(Duration(seconds: timeoutMs));
+    } on TimeoutException {
+      await player.stop();
     } finally {
-      if (session == _speakSession) {
-        _speakingMsg = null;
-        if (mounted) setState(() {});
-      }
+      await sub.cancel();
     }
   }
 
@@ -547,16 +563,9 @@ class _HomePageState extends State<HomePage>
   /// 双播放器交替（Kimi 式无间隙流水线）：A 播当前段时 B 预装
   /// 下段（setAudioSource 完成即完成解码缓冲），A 播完立即 play
   /// B——消除每段 MP3 解码起播的卡顿
-  AudioPlayer? _ttsPlayer2;
-  List<AudioPlayer> _ttsPlayers() {
-    final a = _audioPlayer ??= AudioPlayer();
-    final b = _ttsPlayer2 ??= AudioPlayer();
-    return [a, b];
-  }
 
-  /// 伪流式朗读（Kimi 思路）：文本按语义切段，逐段合成 + 播放当前段时
-  /// 预取下一段——首段几百毫秒即出声，段间几乎无感衔接。
-  /// [_speakSession] 会话号：停止/切消息时自增使旧管道整体失效
+
+  /// 在线 API 朗读（OpenAI 兼容 /audio/speech），播放走统一队列管道
   Future<void> _speakViaApi(Message m) async {
     final g = _general;
     if (g.ttsBaseUrl.trim().isEmpty) {
@@ -569,37 +578,7 @@ class _HomePageState extends State<HomePage>
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
-    final players = _ttsPlayers();
-    await players[0].stop();
-    await players[1].stop();
-    try {
-      await players[0].setAudioSource(
-        _BytesAudioSource(await _synthSegment(segs[0])),
-      );
-      Future<void>? nextLoad;
-      for (var i = 0; i < segs.length; i++) {
-        if (session != _speakSession) return;
-        final player = players[i % 2];
-        // 下段在另一播放器预装（合成 + 解码与播放并发 → 到点即切）
-        if (i + 1 < segs.length) {
-          final ni = i + 1;
-          nextLoad = _synthSegment(segs[ni]).then(
-            (b) => players[ni % 2].setAudioSource(_BytesAudioSource(b)),
-          );
-        }
-        await _playSegmentToCompletion(player);
-        if (nextLoad != null) await nextLoad;
-      }
-    } catch (e) {
-      if (session == _speakSession) {
-        _toast('语音合成失败：$e');
-      }
-    } finally {
-      if (session == _speakSession) {
-        _speakingMsg = null;
-        if (mounted) setState(() {});
-      }
-    }
+    await _speakQueue(segs, _synthSegment);
   }
 
   /// 合成一小段（OpenAI 兼容 /audio/speech → MP3 字节）
@@ -11363,30 +11342,6 @@ Uint8List _b64ToBytes(String dataUrl) {
 }
 
 /// 内存音频源（API 返回的 MP3 字节直接播放，不落盘）
-/// 播完一段音频：play() 的 Future 在音频焦点被夺/MP3 时长未知时
-/// 可能提前完成（下一段顶掉未播完的上段 = 分段互相截断）——
-/// 改等 processingState == completed（真播放完成）
-Future<void> _playSegmentToCompletion(AudioPlayer player) async {
-  var completed = false;
-  final finished = Completer<void>();
-  late final StreamSubscription<ProcessingState> sub;
-  sub = player.processingStateStream.listen((st) {
-    if (st == ProcessingState.completed) {
-      completed = true;
-      if (!finished.isCompleted) finished.complete();
-    }
-  });
-  try {
-    // 双信号全等待：completed 事件先到就切会产生重音（ExoPlayer 的
-    // completed 事件略早于音频真正放完，上段尾巴叠着下段开头）。
-    // 双播放器预装后这里的等待不再付出解码间隙，只等两个信号收齐
-    await player.play();
-    if (!completed) await finished.future;
-  } finally {
-    await sub.cancel();
-  }
-}
-
 class _BytesAudioSource extends StreamAudioSource {
   _BytesAudioSource(this._bytes);
 
