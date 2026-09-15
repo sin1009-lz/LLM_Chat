@@ -3513,37 +3513,60 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                 onChanged: (v) =>
                     _update((s) => s.copyWith(imageCompressEnabled: v)),
               ),
-              if (_s.imageCompressEnabled) ...[
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    const SizedBox(width: 20),
-                    const Text('目标百万像素'),
-                    Expanded(
-                      child: Slider(
-                        value: _s.imageMaxMegapixels.clamp(0.5, 12.0),
-                        min: 0.5,
-                        max: 12.0,
-                        divisions: 23,
-                        label:
-                            '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
-                        onChanged: (v) => _update(
-                          (s) => s.copyWith(imageMaxMegapixels: v),
+              if (_s.imageCompressEnabled)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+                  child: Row(
+                    children: [
+                      Text(
+                        '目标像素',
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                      ),
+                      Expanded(
+                        child: SliderTheme(
+                          data: SliderThemeData(
+                            trackHeight: 10,
+                            activeTrackColor: Colors.grey.shade700,
+                            inactiveTrackColor: Colors.grey.withValues(
+                              alpha: 0.25,
+                            ),
+                            thumbColor: Colors.white,
+                            thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 9,
+                            ),
+                            overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 0,
+                            ),
+                            tickMarkShape: SliderTickMarkShape.noTickMark,
+                          ),
+                          child: Slider(
+                            value: _s.imageMaxMegapixels.clamp(0.5, 12.0),
+                            min: 0.5,
+                            max: 12.0,
+                            divisions: 23,
+                            onChanged: (v) => _update(
+                              (s) => s.copyWith(imageMaxMegapixels: v),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                    SizedBox(
-                      width: 56,
-                      child: Text(
+                      Text(
                         '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
-                        textAlign: TextAlign.end,
-                        style: Theme.of(context).textTheme.bodySmall,
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
                       ),
-                    ),
-                    const SizedBox(width: 20),
-                  ],
+                    ],
+                  ),
                 ),
-              ],
               const SizedBox(height: 12),
 
               // ── 渲染 ──
