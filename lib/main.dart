@@ -10077,6 +10077,8 @@ class _MessageItemState extends State<_MessageItem> {
   /// 只是多/少 build 一帧（视觉无损）。
   /// 工具卡片：ReAct 轮次中 content 不变而 toolCalls 增长/回填
   /// resultCount——必须计入（漏掉时工具分割卡不渲染）
+  /// 朗读高亮：句号/块号变化必须计入——气泡子树被 _cached 跳过
+  /// 重建时 speakBlockIndex 不会重新计算，高亮永远不显示
   int _signature() =>
       widget.message.content.length * 31 +
       (widget.message.thinking?.length ?? 0) * 17 +
@@ -10091,6 +10093,8 @@ class _MessageItemState extends State<_MessageItem> {
       (widget.streaming ? 9923 : 0) +
       (widget.message.imageParts?.length ?? 0) * 9907 +
       (widget.message.fileParts?.length ?? 0) * 9901 +
+      ((_home?._speakBlockOf(widget.message) ?? -1) + 1) * 9871 +
+      ((_home?._speakSentenceOf(widget.message) ?? -1) + 2) * 9877 +
       (widget.message.toolCalls?.fold<int>(
             0,
             (a, t) => a * 31 + (t.resultCount ?? -1000) + (t.expanded ? 7 : 0),
