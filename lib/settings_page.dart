@@ -3760,6 +3760,17 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                     _update((s) => s.copyWith(builtinSearchEnabled: v)),
               ),
               const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.code,
+                title: '运行 Python',
+                subtitle: 'builtin__run_python（本地 Pyodide 沙箱，'
+                    '发图/读网页依赖此内核）',
+                value: _s.builtinPythonEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinPythonEnabled: v)),
+              ),
+              const SizedBox(height: 12),
               Material(
                 color: _buttonColor(context),
                 borderRadius: BorderRadius.circular(14),
