@@ -16,7 +16,6 @@ import 'package:flutter/rendering.dart' show RenderProxyBox;
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
@@ -454,53 +453,33 @@ class _HomePageState extends State<HomePage>
   /// 变化即全列表失效缓存，杜绝「设置改了界面不动」类漏洞
   int _renderEpoch = 0;
 
-  // ── 系统 TTS（朗读助手消息）──
-  FlutterTts? _tts;
+  // ── 免费 TTS：WebView speechSynthesis（WebView 内置 Web Speech API，
+  // 走微软/系统神经语音，免密钥免部署免自建服务）──
+  WebViewController? _speechTts;
+  bool _speechTtsReady = false;
 
   /// 正在朗读的消息对象（null = 空闲）；同屏仅一条在播
   Message? _speakingMsg;
 
-  /// 引擎可用（设备无 TTS 引擎时按钮置灰）
-  bool _ttsReady = false;
-
-  /// 懒初始化系统 TTS 引擎（首次点喇叭时）。
-  /// 部分设备（如小米 mibrain）首帧初始化报 -1（瞬态失败）——
-  /// 显式指定引擎 + 短暂重试；语言逐级回退（zh-CN → zh → 默认）
+  /// 朗读会话号：停止/切消息时自增——旧管道据此自杀
   Future<void> _initTts() async {
-    if (_tts != null) return;
-    final t = FlutterTts();
+    if (_speechTts != null) return;
+    final c = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted);
     try {
-      // 语言逐级回退（zh-CN → zh）；探测失败也继续用默认语言
-      await t.setLanguage('zh-CN');
-      await t.setSpeechRate(0.5);
-      t.setStartHandler(() {
-        if (mounted) setState(() {}); // 播放态由 _speakingMsg 驱动
-      });
-      t.setCompletionHandler(() {
-        _speakingMsg = null;
-        if (mounted) setState(() {});
-      });
-      t.setErrorHandler((msg) {
-        _speakingMsg = null;
-        if (mounted) setState(() {});
-      });
-      // cancel/stop 也结束朗读态
-      t.setCancelHandler(() {
-        _speakingMsg = null;
-        if (mounted) setState(() {});
-      });
-      _ttsReady = true;
-      _tts = t;
+      await c.loadHtmlString('<html><body></body></html>');
+    } catch (_) {}
+    _speechTts = c;
+    if (mounted) setState(() {});
+    await WidgetsBinding.instance.endOfFrame;
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    try {
+      final r = await c.runJavaScriptReturningResult(
+        'typeof speechSynthesis !== "undefined" ? 1 : -1',
+      );
+      _speechTtsReady = r.toString().contains('1');
     } catch (_) {
-      _ttsReady = false;
-      // init -1 常为瞬态：短暂等待后重试一次（重试仍失败则放弃本次）
-      await Future.delayed(const Duration(milliseconds: 600));
-      try {
-        await t.setLanguage('zh-CN');
-        _ttsReady = true;
-      } catch (_) {
-        _ttsReady = false;
-      }
+      _speechTtsReady = false;
     }
     if (mounted) setState(() {});
   }
@@ -508,40 +487,50 @@ class _HomePageState extends State<HomePage>
   /// 朗读/停止切换：同一条再点 = 停止；新消息点 = 换朗读对象
   Future<void> _toggleSpeak(Message m) async {
     await _initTts();
-    final t = _tts;
-    if (t == null || !_ttsReady) {
-      _toast('设备无可用语音引擎');
+    final t = _speechTts;
+    if (t == null || !_speechTtsReady) {
+      _toast('语音引擎不可用');
       return;
     }
     if (identical(_speakingMsg, m)) {
-      await t.stop();
-      _speakingMsg = null;
-      if (mounted) setState(() {});
+      await _stopSpeaking();
       return;
     }
-    // 在线 API 优先（配置了就云端合成；本机引擎多不可用）
+    // 在线 API 优先（用户配置了就走云端合成）
     if (_general.ttsUseApi && _general.ttsBaseUrl.trim().isNotEmpty) {
       await _speakViaApi(m);
       return;
     }
-    // 切换朗读对象：先停旧的
-    await t.stop();
     final text = applyDisplayRules(m.content, _replaceRules).trim();
-    // 长文截断：系统 TTS 队列过长易卡，3000 字足够听
-    final speakText = text.length > 3000
-        ? '${text.substring(0, 3000)}……'
-        : text;
+    final speakText = text.length > 3000 ? text.substring(0, 3000) : text;
     if (speakText.isEmpty) return;
+    await _stopSpeaking();
+    final session = ++_speakSession;
     setState(() => _speakingMsg = m);
-    await t.speak(speakText);
+    final parts = jsonEncode(_splitForTts(speakText, maxTotal: 3000));
+    final js = '(function(){try{speechSynthesis.cancel();var parts=__PARTS__;var i=0;function next(){if(i>=parts.length){pySpeechDone.postMessage("done");return;}var u=new SpeechSynthesisUtterance(parts[i++]);u.lang="zh-CN";u.rate=__RATE__;u.onend=next;u.onerror=function(){pySpeechDone.postMessage("done");};speechSynthesis.speak(u);}next();}catch(e){pySpeechDone.postMessage("done");}})()'
+        .replaceAll('__PARTS__', parts)
+        .replaceAll('__RATE__', _general.ttsSpeed.toStringAsFixed(2));
+    await t.addJavaScriptChannel(
+      'pySpeechDone',
+      onMessageReceived: (_) {
+        if (session == _speakSession) {
+          _speakingMsg = null;
+          if (mounted) setState(() {});
+        }
+      },
+    );
+    await t.runJavaScript(js);
   }
 
   /// 停止朗读（切换会话/删除消息等场景调用）
   Future<void> _stopSpeaking() async {
     if (_speakingMsg == null) return;
     _speakingMsg = null;
-    _speakSession++; // 伪流式管道整体失效（在途合成/播放全部作废）
-    await _tts?.stop();
+    _speakSession++;
+    _speechTts?.runJavaScript(
+      'try{speechSynthesis.cancel();}catch(e){}',
+    );
     await _audioPlayer?.stop();
     if (mounted) setState(() {});
   }
@@ -5016,7 +5005,7 @@ class _HomePageState extends State<HomePage>
     _fastNavVisible.dispose();
     _awayFromBottom.dispose();
     _inputBarAnimatedTop.dispose();
-    _tts?.stop();
+    _speechTts?.runJavaScript('try{speechSynthesis.cancel();}catch(e){}');
     _streamSub?.cancel();
     _maintainTimer?.cancel();
     _chatScroll.dispose();
@@ -5392,6 +5381,17 @@ class _HomePageState extends State<HomePage>
               width: 2,
               height: 2,
               child: IgnorePointer(child: WebViewWidget(controller: _webReader!)),
+            ),
+          ),
+        // 免费 TTS 宿主（speechSynthesis）
+        if (_speechTts != null)
+          Positioned(
+            left: -2,
+            top: -2,
+            child: SizedBox(
+              width: 2,
+              height: 2,
+              child: IgnorePointer(child: WebViewWidget(controller: _speechTts!)),
             ),
           ),
       ],
