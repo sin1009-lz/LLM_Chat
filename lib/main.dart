@@ -515,9 +515,12 @@ class _HomePageState extends State<HomePage>
         ));
   }
 
-  /// 朗读分段（块对齐，Kimi RawText 同思路）：显示文本 → LaTeX 预处理
-  ///（与渲染一致）→ 按空行切块 → 每块独立 TTS 预处理 + 句级分段，
-  /// 每段携带来源块号——播放到某段时按块号高亮气泡对应原文块
+  /// 朗读分段（Kimi 架构：客户端零裁剪，间距由合成端产出）：
+  /// 显示文本 → LaTeX 预处理（与渲染一致）→ 按空行切块 → **每块一次
+  /// 合成请求**——句间距在单次合成内部由韵律引擎产生，天然统一；
+  /// 请求边界只落在段落处（天然停顿，头部静音差异不可闻）。
+  /// 队列项=块 → currentIndex 即块号，高亮免映射。
+  /// 超长块（罕见：整段长文/拍平大表）按句切，防单请求过大
   (List<String>, List<int>) _speakSegments(String display) {
     final data = _general.latexEnabled ? preprocessLatex(display) : display;
     final blocks = splitMarkdownBlocks(data);
@@ -526,8 +529,13 @@ class _HomePageState extends State<HomePage>
     for (var b = 0; b < blocks.length; b++) {
       final tts = _ttsPrepText(blocks[b]);
       if (tts.isEmpty) continue;
-      for (final s in _splitForTts(tts, maxTotal: 3000)) {
-        segs.add(s);
+      if (tts.length > 800) {
+        for (final s in _splitForTts(tts, maxTotal: 3000)) {
+          segs.add(s);
+          segBlocks.add(b);
+        }
+      } else {
+        segs.add(tts);
         segBlocks.add(b);
       }
     }
@@ -586,8 +594,10 @@ class _HomePageState extends State<HomePage>
     });
     try {
       unawaited(player.play());
-      // 兜底超时：段数 × 每段上限时长 + 缓冲，防异常挂死
-      final timeoutMs = 60 + segs.length * 60;
+      // 兜底超时：按总字数估时长（中文 ~4-5 字/秒，取 3 字/秒下界）
+      // + 缓冲，防异常挂死——块级合成单段可达数十秒，不能按段数估
+      final totalChars = segs.fold<int>(0, (a, s) => a + s.length);
+      final timeoutMs = 90 + (totalChars / 3).round();
       await done.future.timeout(Duration(seconds: timeoutMs));
     } on TimeoutException {
       await player.stop();
