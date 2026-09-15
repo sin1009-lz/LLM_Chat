@@ -72,6 +72,10 @@ class EdgeTts {
         'User-Agent': _ua,
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Accept-Language': 'en-US,en;q=0.9',
+        // Cookie MUID（官方 DRM.headers_with_muid：随机 32 位大写 hex；
+        // 服务端风控要求，缺它 403）
+        'Cookie':
+            'muid=${List.generate(32, (_) => '0123456789ABCDEF'[Random().nextInt(16)]).join()};',
       },
     );
 
