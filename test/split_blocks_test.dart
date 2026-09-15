@@ -21,10 +21,30 @@ void main() {
       expect(s.first, contains('?b=1'));
     });
 
-    test('含围栏/表格/列表行的块返回 null（整块高亮）', () {
+    test('含围栏/表格行返回 null；列表块按条目切分', () {
       expect(splitProseSentences('```dart\ncode\n```'), isNull);
       expect(splitProseSentences('| a | b |\n| - | - |'), isNull);
-      expect(splitProseSentences('- 列表项。'), isNull);
+      // 列表 → 顶级条目片
+      final items = splitProseSentences('- 第一条。第二条。\n- 第二项。\n- 第三项');
+      expect(items, hasLength(3));
+      expect(items!.first, startsWith('- 第一条'));
+    });
+
+    test('有序列表按条目切分', () {
+      final items = splitProseSentences('1. 步骤一\n2. 步骤二\n3. 步骤三');
+      expect(items, hasLength(3));
+      expect(items![1], '2. 步骤二');
+    });
+
+    test('引导句+列表：引导句自成一片', () {
+      final items = splitProseSentences('步骤如下：\n- 甲\n- 乙');
+      expect(items, hasLength(3));
+      expect(items!.first, '步骤如下：');
+    });
+
+    test('松散列表条目（空行分隔）各成一片', () {
+      final items = splitProseSentences('- 第一项\n\n- 第二项\n\n- 第三项');
+      expect(items, hasLength(3));
     });
 
     test('无句末标点的整段为一句', () {

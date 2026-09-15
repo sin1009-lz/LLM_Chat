@@ -594,7 +594,7 @@ class _HomePageState extends State<HomePage>
     for (var si = 0; si < sentences.length; si++) {
       final norm = sentences[si]
           .replaceAll(RegExp(r'\s'), '')
-          .replaceFirst(RegExp(r'^[#>*\-]+'), '');
+          .replaceFirst(RegExp(r'^[#>*|\-]*(\d{1,3}[.)])?'), '');
       if (norm.isEmpty) continue;
       final probe = norm.substring(0, norm.length < 3 ? norm.length : 3);
       final at = s.indexOf(probe, ptr);
@@ -652,12 +652,21 @@ class _HomePageState extends State<HomePage>
     // 句级定位（Kimi RawText 同思路）：播放位置 → WordBoundary 当前词
     // → 词流对齐回显示句子 → 当前句加灰底。positionStream 高频触发，
     // 仅句号变化才 setState
+    final diagDone = <int>{};
     final posSub = player.positionStream.listen((pos) {
       if (session != _speakSession || mounted == false) return;
       final words = itemWords[curIdx];
       if (words == null || words.isEmpty) return;
       final starts = startsFor(curIdx);
-      if (starts.isEmpty) return;
+      if (starts.isEmpty) {
+        if (diagDone.add(curIdx)) {
+          print(
+            'TTSDIAG no-starts item=$curIdx words=${words.length} '
+            'sents=${curIdx < segSentences.length ? (segSentences[curIdx]?.length ?? -1) : -1}',
+          );
+        }
+        return;
+      }
       final p = pos.inMilliseconds;
       var w = 0;
       for (var i = 0; i < words.length; i++) {
@@ -674,11 +683,16 @@ class _HomePageState extends State<HomePage>
       if (sent != _speakingSent &&
           _speakingSeg?.$1 == m &&
           _speakingSeg?.$2 == curIdx) {
+        print('TTSDIAG pos=${p}ms w=$w sent=$sent starts=$starts');
         setState(() => _speakingSent = sent);
       }
     });
     _speakingSent = -1;
     setState(() => _speakingSeg = (m, 0, segBlocks));
+    print(
+      'TTSDIAG q0 words=${first.words.length} '
+      'sents=${segSentences.isEmpty ? -1 : (segSentences[0]?.length ?? -1)}',
+    );
     // 后台喂队列：双并发预合成、严格按序入队——串行合成时短块
     //（标题/列表项）播完而下一长块未就绪会硬停顿；并发窗口 2
     // 兼顾 Edge 连接压力

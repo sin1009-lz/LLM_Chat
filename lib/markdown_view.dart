@@ -79,12 +79,59 @@ String preprocessLatex(String input) {
   return out;
 }
 
-/// 散文块 → 句子列表（朗读句级高亮用；朗读管道与渲染共用，保证
-/// 索引一致）。仅纯散文块：含围栏/表格/列表行的块返回 null（整块
-/// 高亮——这类块没有可靠的句级原文对应）。断句点：。！？；；
-/// ASCII ?! 要求后随空白/行尾/CJK，防切断 URL（?size= 之类）；
-/// 行内代码/强调标记内部不断（切开会让 markdown 标记失衡）
+/// 朗读高亮切分（管道与渲染共用，保证索引一致）：
+/// - 散文块 → 句子（断句点：。！？；；ASCII ?! 需后随空白/行尾/CJK
+///   防切断 URL；行内代码/强调内部不断，防 markdown 标记失衡）
+/// - 列表块 → 顶级条目（朗读到第几条亮第几条；条目续行跟随条目）
+/// - 表格/围栏块 → null（整块高亮：表格拆行会碎成无头表）
 List<String>? splitProseSentences(String block) {
+  final lines = block.split('\n');
+  var hasFence = false, hasTable = false, hasItem = false, content = 0;
+  for (final l in lines) {
+    final t = l.trim();
+    if (t.isEmpty) continue;
+    content++;
+    if (RegExp(r'^\s*(`{3,}|~{3,})').hasMatch(l)) {
+      hasFence = true;
+    } else if (RegExp(r'^\s*\|.*\|').hasMatch(t)) {
+      hasTable = true;
+    } else if (RegExp(r'^\s{0,3}([-*+]\s|\d{1,3}[.)]\s)').hasMatch(t)) {
+      hasItem = true;
+    }
+  }
+  if (content == 0 || hasFence || hasTable) return null;
+  if (hasItem) return _splitListItems(block);
+  return _splitSentences(block);
+}
+
+/// 列表块 → 顶级条目片：条目标记行（缩进 ≤3）开新片，
+/// 非标记行（引导句/续行）跟随当前片（无当前片则自成一片）
+List<String> _splitListItems(String block) {
+  final itemMark = RegExp(r'^\s{0,3}([-*+]\s|\d{1,3}[.)]\s)');
+  final out = <String>[];
+  final buf = <String>[];
+  void flush() {
+    if (buf.isEmpty) return;
+    final s = buf.join('\n').trim();
+    buf.clear();
+    if (s.isNotEmpty) out.add(s);
+  }
+
+  for (final l in block.split('\n')) {
+    if (l.trim().isEmpty) {
+      if (buf.isNotEmpty) buf.add('');
+      continue;
+    }
+    if (itemMark.hasMatch(l) && !RegExp(r'^\s{4,}').hasMatch(l)) {
+      flush();
+    }
+    buf.add(l);
+  }
+  flush();
+  return out.isEmpty ? [block] : out;
+}
+
+List<String>? _splitSentences(String block) {
   for (final l in block.split('\n')) {
     final t = l.trim();
     if (t.isEmpty) continue;
