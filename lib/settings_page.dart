@@ -3510,60 +3510,77 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    InkWell(
-                      borderRadius: BorderRadius.circular(14),
-                      onTap: () => _update(
-                        (s) => s.copyWith(
-                          imageCompressEnabled: !_s.imageCompressEnabled,
-                        ),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 12,
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.photo_size_select_large_outlined,
-                              size: 20,
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '发送图片压缩',
-                                    style: Theme.of(context).textTheme.bodyMedium
-                                        ?.copyWith(fontWeight: FontWeight.w500),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    _s.imageCompressEnabled
-                                        ? '限制发送图片的目标像素（llama.cpp 同款）'
-                                        : '关闭后原图直传（仍受 4MB / 8192px 校验）',
-                                    style: Theme.of(context).textTheme.bodySmall
-                                        ?.copyWith(
-                                          color: Theme.of(
-                                            context,
-                                          ).colorScheme.onSurfaceVariant,
-                                        ),
-                                  ),
-                                ],
+                    Padding(
+                      padding: const EdgeInsets.only(left: 2),
+                      child: Row(
+                        children: [
+                          // 点文字区切换；Switch 独立兄弟节点（同区域
+                          // 双手势会双触发互相抵消 = 开关失灵）
+                          Expanded(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: () => _update(
+                                (s) => s.copyWith(
+                                  imageCompressEnabled:
+                                      !_s.imageCompressEnabled,
+                                ),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 12,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                      Icons.photo_size_select_large_outlined,
+                                      size: 20,
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            '发送图片压缩',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodyMedium?.copyWith(
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            _s.imageCompressEnabled
+                                                ? '限制发送图片的目标像素（llama.cpp 同款）'
+                                                : '关闭后原图直传（仍受 4MB / 8192px 校验）',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodySmall?.copyWith(
+                                              color: Theme.of(
+                                                context,
+                                              ).colorScheme.onSurfaceVariant,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
-                            Switch(
-                              value: _s.imageCompressEnabled,
-                              onChanged: (v) => _update(
-                                (s) => s.copyWith(imageCompressEnabled: v),
-                              ),
+                          ),
+                          Switch(
+                            value: _s.imageCompressEnabled,
+                            onChanged: (v) => _update(
+                              (s) => s.copyWith(imageCompressEnabled: v),
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
                     ),
                     if (_s.imageCompressEnabled)
