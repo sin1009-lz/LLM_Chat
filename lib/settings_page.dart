@@ -3502,185 +3502,128 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                     _update((s) => s.copyWith(quickNavEnabled: v)),
               ),
               const SizedBox(height: 12),
-              _switchTile(
-                context,
-                icon: Icons.photo_size_select_large_outlined,
-                title: '发送图片压缩',
-                subtitle: _s.imageCompressEnabled
-                    ? '目标 ${_s.imageMaxMegapixels.toStringAsFixed(_s.imageMaxMegapixels % 1 == 0 ? 0 : 2)} 百万像素（llama.cpp 同款像素预算）'
-                    : '关闭后原图直传（仍受 4MB / 8192px 安全校验）',
-                value: _s.imageCompressEnabled,
-                onChanged: (v) =>
-                    _update((s) => s.copyWith(imageCompressEnabled: v)),
-              ),
-              if (_s.imageCompressEnabled)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
-                  child: Row(
-                    children: [
-                      Text(
-                        '目标像素',
-                        style: Theme.of(context).textTheme.bodySmall
-                            ?.copyWith(
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.onSurfaceVariant,
-                            ),
-                      ),
-                      Expanded(
-                        child: SliderTheme(
-                          data: SliderThemeData(
-                            trackHeight: 10,
-                            activeTrackColor: Colors.grey.shade700,
-                            inactiveTrackColor: Colors.grey.withValues(
-                              alpha: 0.25,
-                            ),
-                            thumbColor: Colors.white,
-                            thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 9,
-                            ),
-                            overlayShape: const RoundSliderOverlayShape(
-                              overlayRadius: 0,
-                            ),
-                            tickMarkShape: SliderTickMarkShape.noTickMark,
-                          ),
-                          child: Slider(
-                            value: _s.imageMaxMegapixels.clamp(0.5, 12.0),
-                            min: 0.5,
-                            max: 12.0,
-                            divisions: 23,
-                            onChanged: (v) => _update(
-                              (s) => s.copyWith(imageMaxMegapixels: v),
-                            ),
-                          ),
-                        ),
-                      ),
-                      Text(
-                        '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
-                        style: Theme.of(context).textTheme.bodySmall
-                            ?.copyWith(
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.onSurfaceVariant,
-                            ),
-                      ),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 12),
-
-              // ── 渲染 ──
-              _sectionLabel('渲染'),
-              _switchTile(
-                context,
-                icon: Icons.article_outlined,
-                title: 'Markdown 渲染',
-                subtitle: '消息正文按 Markdown 格式渲染',
-                value: _s.markdownEnabled,
-                onChanged: (v) =>
-                    _update((s) => s.copyWith(markdownEnabled: v)),
-              ),
-              const SizedBox(height: 12),
-              // 上下文占用百分比（默认只显示圆环；开启后百分比显示在圆环右侧）
-              _switchTile(
-                context,
-                icon: Icons.donut_large,
-                title: '上下文占用百分比',
-                subtitle: '在输出气泡的上下文占用圆环右侧显示百分比',
-                value: _s.contextPercent,
-                onChanged: (v) => _update((s) => s.copyWith(contextPercent: v)),
-              ),
-              const SizedBox(height: 12),
-              _switchTile(
-                context,
-                icon: Icons.functions,
-                title: 'LaTeX 渲染',
-                subtitle: '识别 \$...\$ 与 \$\$...\$\$ 数学公式',
-                value: _s.latexEnabled,
-                onChanged: (v) => _update((s) => s.copyWith(latexEnabled: v)),
-              ),
-              const SizedBox(height: 12),
-              _switchTile(
-                context,
-                icon: Icons.account_tree_outlined,
-                title: 'Mermaid 图表',
-                subtitle: '渲染 mermaid 代码块为流程图',
-                value: _s.mermaidEnabled,
-                onChanged: (v) => _update((s) => s.copyWith(mermaidEnabled: v)),
-              ),
-              const SizedBox(height: 12),
-              _switchTile(
-                context,
-                icon: Icons.preview_outlined,
-                title: 'Artifacts 预览',
-                subtitle: '自动预览 HTML/SVG 代码块的生成物',
-                value: _s.artifactsEnabled,
-                onChanged: (v) =>
-                    _update((s) => s.copyWith(artifactsEnabled: v)),
-              ),
-              const SizedBox(height: 20),
-
-              // ── 内置工具 ──
-              _sectionLabel('内置工具'),
-              _switchTile(
-                context,
-                icon: Icons.build_outlined,
-                title: '内置工具',
-                subtitle: '启用后模型可调用以下工具（可单独开关）',
-                value: _s.builtinToolsEnabled,
-                onChanged: (v) =>
-                    _update((s) => s.copyWith(builtinToolsEnabled: v)),
-              ),
-              const SizedBox(height: 12),
-              _switchTile(
-                context,
-                icon: Icons.schedule,
-                title: '获取当前时间',
-                subtitle: 'builtin__get_current_time',
-                // 子开关与总开关相互独立：各自记忆并始终可操作
-                value: _s.builtinTimeEnabled,
-                onChanged: (v) =>
-                    _update((s) => s.copyWith(builtinTimeEnabled: v)),
-              ),
-              const SizedBox(height: 12),
-              _switchTile(
-                context,
-                icon: Icons.location_on_outlined,
-                title: '获取地理位置',
-                subtitle: 'builtin__get_location（需定位权限）',
-                value: _s.builtinLocationEnabled,
-                onChanged: (v) =>
-                    _update((s) => s.copyWith(builtinLocationEnabled: v)),
-              ),
-              const SizedBox(height: 12),
-              _switchTile(
-                context,
-                icon: Icons.travel_explore,
-                title: '联网搜索',
-                subtitle: 'builtin__web_search（DeepSeek 原生搜索）',
-                value: _s.builtinSearchEnabled,
-                onChanged: (v) =>
-                    _update((s) => s.copyWith(builtinSearchEnabled: v)),
-              ),
-              const SizedBox(height: 12),
+              // 图片压缩：开关 + 目标像素滑条合并一张卡
               Material(
                 color: _buttonColor(context),
                 borderRadius: BorderRadius.circular(14),
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: _projectInput(
-                    context: context,
-                    controller: _reactRoundsCtrl,
-                    label: '工具循环上限（轮）',
-                    hint: '默认 6，范围 2-20',
-                    keyboardType: TextInputType.number,
-                    onChanged: (v) {
-                      final n = int.tryParse(v);
-                      if (n != null && n >= 2 && n <= 20) {
-                        _update((s) => s.copyWith(reactMaxRounds: n));
-                      }
-                    },
-                  ),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () => _update(
+                        (s) => s.copyWith(
+                          imageCompressEnabled: !_s.imageCompressEnabled,
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.photo_size_select_large_outlined,
+                              size: 20,
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '发送图片压缩',
+                                    style: Theme.of(context).textTheme.bodyMedium
+                                        ?.copyWith(fontWeight: FontWeight.w500),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    _s.imageCompressEnabled
+                                        ? '限制发送图片的目标像素（llama.cpp 同款）'
+                                        : '关闭后原图直传（仍受 4MB / 8192px 校验）',
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Switch(
+                              value: _s.imageCompressEnabled,
+                              onChanged: (v) => _update(
+                                (s) => s.copyWith(imageCompressEnabled: v),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (_s.imageCompressEnabled)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+                        child: Row(
+                          children: [
+                            Text(
+                              '目标像素',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                  ),
+                            ),
+                            Expanded(
+                              child: SliderTheme(
+                                data: SliderThemeData(
+                                  trackHeight: 10,
+                                  activeTrackColor: Colors.grey.shade700,
+                                  inactiveTrackColor: Colors.grey.withValues(
+                                    alpha: 0.25,
+                                  ),
+                                  thumbColor: Colors.white,
+                                  thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 9,
+                                  ),
+                                  overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 0,
+                                  ),
+                                  tickMarkShape: SliderTickMarkShape.noTickMark,
+                                ),
+                                child: Slider(
+                                  value: _s.imageMaxMegapixels.clamp(
+                                    0.5,
+                                    12.0,
+                                  ),
+                                  min: 0.5,
+                                  max: 12.0,
+                                  divisions: 23,
+                                  onChanged: (v) => _update(
+                                    (s) => s.copyWith(imageMaxMegapixels: v),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '${_s.imageMaxMegapixels.toStringAsFixed(1)} MP',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
                 ),
               ),
               const SizedBox(height: 12),
