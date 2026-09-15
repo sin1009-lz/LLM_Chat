@@ -19,12 +19,16 @@ class EdgeTts {
   /// Sec-MS-GEC 令牌：Windows FILETIME 向下取整 5 分钟 + "800" +
   /// 受信令牌拼接后的 SHA256 大写十六进制（edge-tts drm.py 同款）
   static String _gec() {
-    var ticks =
-        DateTime.now().millisecondsSinceEpoch * 10000 + 116444736000000000;
-    ticks -= ticks % 3000000000;
+    // 官方算法（edge-tts drm.py，已用官方包对照验证）：
+    // unix 秒 + 11644473600 → 向下取整 300 秒 → ×1e7 转 100ns 刻度
+    //（无 "800" 后缀——此前照错误记忆拼了 800 且 epoch 单位算错 = 403）
+    final unix = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    var t = unix + 11644473600;
+    t -= t % 300;
+    final ticks = (t * 1e7).round();
     return crypto
         .sha256
-        .convert(utf8.encode('$ticks' '800' '$_trustedToken'))
+        .convert(utf8.encode('$ticks$_trustedToken'))
         .toString()
         .toUpperCase();
   }
