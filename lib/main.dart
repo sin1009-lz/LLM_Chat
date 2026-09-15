@@ -466,9 +466,20 @@ class _HomePageState extends State<HomePage>
     if (_speechTts != null) return;
     final c = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted);
+    // 关键：Web Speech API 在 data:/about:blank 源上部分 WebView 禁用
+    //（在线语音引擎只对 http(s) 源开放）——借道本地环回 HTTP 服务的
+    // kernel.html（与 Python 内核同源同服务），返回一个干净空白页
     try {
-      await c.loadHtmlString('<html><body></body></html>');
-    } catch (_) {}
+      await _ensurePyServer();
+      final port = _pyServer!.port;
+      await c.loadRequest(
+        Uri.parse('http://127.0.0.1:$port/kernel.html?blank=1'),
+      );
+    } catch (_) {
+      try {
+        await c.loadHtmlString('<html><body></body></html>');
+      } catch (_) {}
+    }
     _speechTts = c;
     if (mounted) setState(() {});
     await WidgetsBinding.instance.endOfFrame;
@@ -1726,7 +1737,18 @@ class _HomePageState extends State<HomePage>
   Future<void> _pyServeAsset(HttpRequest req) async {
     try {
       var path = req.uri.path;
-      if (path == '/' || path == '/kernel.html') path = '/python_kernel.html';
+      if (path == '/' || path == '/kernel.html') {
+        // TTS 宿主页：?blank=1 返回干净空白（Web Speech 需要 http 源）
+        if (req.uri.queryParameters['blank'] == '1') {
+          req.response.headers.set('Content-Type', 'text/html; charset=utf-8');
+          req.response.add(
+            '<!DOCTYPE html><html><body></body></html>'.codeUnits,
+          );
+          await req.response.close();
+          return;
+        }
+        path = '/python_kernel.html';
+      }
       if (path.contains('..')) {
         req.response.statusCode = 404;
         await req.response.close();
