@@ -79,6 +79,9 @@ class MainActivity : FlutterActivity() {
                 .build()
 
             val audio = java.io.ByteArrayOutputStream()
+            // WordBoundary 逐词时间戳（100ns ticks）：朗读句级高亮的
+            // 时间轴来源（Kimi 的 RawText 由服务端回传，我们用协议自带元数据）
+            val words = ArrayList<HashMap<String, Any>>()
             val esc = text
                 .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -125,17 +128,54 @@ class MainActivity : FlutterActivity() {
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (text.contains("Path:turn.end")) {
+                    val sep = text.indexOf("\r\n\r\n")
+                    val header = if (sep >= 0) text.substring(0, sep) else text
+                    val body = if (sep >= 0) text.substring(sep + 4) else ""
+                    if (header.contains("Path:turn.end")) {
                         webSocket.close(1000, null)
                         val bytes = audio.toByteArray()
                         // Kimi 同款架构：客户端零处理，音频原样直传——
                         // 间距由合成端产出（Dart 侧按 markdown 块整块合成，
-                        // 句间距在单次合成内部由韵律引擎产生，天然统一）
+                        // 句间距在单次合成内部由韵律引擎产生，天然统一）。
+                        // words 一并带回供句级高亮定位
                         main.post {
                             replyOnce {
                                 if (bytes.isEmpty()) result.error("empty", "no audio", null)
-                                else result.success(bytes.toByteString().toByteArray())
+                                else {
+                                    val out = HashMap<String, Any>()
+                                    out["audio"] = bytes.toByteString().toByteArray()
+                                    out["words"] = words.toList()
+                                    result.success(out)
+                                }
                             }
+                        }
+                    } else if (header.contains("Path:audio.metadata") ||
+                        header.contains("Path:response")
+                    ) {
+                        // 词时间戳：新版 metadata[].data / 旧版 audioMetadata[]
+                        try {
+                            val root = org.json.JSONObject(body)
+                            val arr = root.optJSONArray("metadata")
+                                ?: root.optJSONArray("audioMetadata")
+                            if (arr != null) {
+                                for (k in 0 until arr.length()) {
+                                    val e = arr.getJSONObject(k)
+                                    if (e.optString("type") != "WordBoundary") continue
+                                    val d = e.optJSONObject("data") ?: e
+                                    val txt = d.optJSONObject("text")
+                                        ?.optString("Text").orEmpty()
+                                    val off = d.optLong("offset", d.optLong("Offset", -1))
+                                    val dur = d.optLong("duration", d.optLong("Duration", 0))
+                                    if (off < 0 || txt.isEmpty()) continue
+                                    val w = HashMap<String, Any>()
+                                    w["start"] = (off / 10000).toInt()  // 100ns → ms
+                                    w["dur"] = (dur / 10000).toInt()
+                                    w["text"] = txt
+                                    words.add(w)
+                                }
+                            }
+                        } catch (_: Exception) {
+                            // 元数据解析失败不影响音频回传（句级高亮自动降级）
                         }
                     }
                 }

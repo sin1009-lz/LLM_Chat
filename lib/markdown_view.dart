@@ -29,6 +29,7 @@ class MarkdownView extends StatefulWidget {
     this.mermaidEnabled = false,
     this.artifactsEnabled = false,
     this.speakBlockIndex = -1,
+    this.speakSentenceIndex = -1,
   });
 
   final String text;
@@ -49,6 +50,11 @@ class MarkdownView extends StatefulWidget {
   /// -1 = 无朗读/本气泡不在朗读）。朗读管道按同一切分函数分块，
   /// 段→块号由播放队列映射（Kimi RawText 同思路：语音段回指原文）
   final int speakBlockIndex;
+
+  /// 句级高亮：当前块内读到第几句（splitProseSentences 的句号，
+  /// -1 = 整块高亮/非散文块/无词时间戳）。句片静态切分、缓存复用，
+  /// 高亮移动只换装饰不重排
+  final int speakSentenceIndex;
 
   @override
   State<MarkdownView> createState() => _MarkdownViewState();
@@ -71,6 +77,64 @@ String preprocessLatex(String input) {
     (m) => '`LATEX:${m.group(1)}`',
   );
   return out;
+}
+
+/// 散文块 → 句子列表（朗读句级高亮用；朗读管道与渲染共用，保证
+/// 索引一致）。仅纯散文块：含围栏/表格/列表行的块返回 null（整块
+/// 高亮——这类块没有可靠的句级原文对应）。断句点：。！？；；
+/// ASCII ?! 要求后随空白/行尾/CJK，防切断 URL（?size= 之类）；
+/// 行内代码/强调标记内部不断（切开会让 markdown 标记失衡）
+List<String>? splitProseSentences(String block) {
+  for (final l in block.split('\n')) {
+    final t = l.trim();
+    if (t.isEmpty) continue;
+    if (RegExp(r'^\s*(`{3,}|~{3,})').hasMatch(l) ||
+        RegExp(r'^\s*\|.*\|').hasMatch(t) ||
+        RegExp(r'^\s{0,3}([-*+]\s|\d{1,3}[.)]\s)').hasMatch(t)) {
+      return null;
+    }
+  }
+  final out = <String>[];
+  final buf = StringBuffer();
+  var inCode = false; // 行内代码内
+  var bold = false;
+  var italic = false;
+  var run = 0; // 连续 * 计数
+  void cut() {
+    final s = buf.toString().trim();
+    buf.clear();
+    if (s.isNotEmpty) out.add(s);
+  }
+
+  final cjkNext = RegExp(r'''[\s\u4e00-\u9fff"'\)\]]''');
+  for (var i = 0; i < block.length; i++) {
+    final c = block[i];
+    buf.write(c);
+    if (c == '`') {
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) continue;
+    if (c == '*') {
+      run++;
+      continue;
+    }
+    if (run > 0) {
+      if (run >= 2) {
+        bold = !bold;
+      } else {
+        italic = !italic;
+      }
+      run = 0;
+    }
+    if (bold || italic) continue;
+    final isBreak = '。！？；;'.contains(c) ||
+        ((c == '?' || c == '!') &&
+            (i + 1 >= block.length || cjkNext.hasMatch(block[i + 1])));
+    if (isBreak) cut();
+  }
+  cut();
+  return out.isEmpty ? null : out;
 }
 
 /// 按块切分（渲染与朗读管道共用）：空行切块，围栏感知；
@@ -155,6 +219,10 @@ class _MarkdownViewState extends State<MarkdownView> {
   String? _spSource;
   Brightness? _spBrightness;
   List<Widget>? _spBodies;
+
+  /// 散文块的句片缓存（块号 → 句体列表）：句级高亮只在句片间移动
+  /// 装饰，静态切分保证朗读期间零重排
+  Map<int, List<Widget>> _spSentences = {};
 
   @override
   void initState() {
@@ -261,7 +329,8 @@ class _MarkdownViewState extends State<MarkdownView> {
   }
 
   /// 朗读块渲染：每块独立 MarkdownBody（与整篇渲染等价——块边界
-  /// 即空行，markdown 结构不被割裂），高亮块包灰底圆角容器
+  /// 即空行，markdown 结构不被割裂），高亮块包灰底圆角容器；
+  /// 散文块且给出句号时降为句级高亮（句片静态切分缓存）
   Widget _buildSpeaking(BuildContext context) {
     final theme = Theme.of(context);
     if (_spSource != widget.text || _spBrightness != theme.brightness) {
@@ -274,6 +343,14 @@ class _MarkdownViewState extends State<MarkdownView> {
       _spBodies = blocks
           .map((b) => RepaintBoundary(child: widget._buildBody(context, b)))
           .toList();
+      _spSentences = {};
+      for (var i = 0; i < blocks.length; i++) {
+        final sentences = splitProseSentences(blocks[i]);
+        if (sentences == null) continue;
+        _spSentences[i] = sentences
+            .map((s) => RepaintBoundary(child: widget._buildBody(context, s)))
+            .toList();
+      }
     }
     final bodies = _spBodies!;
     final hi = widget.speakBlockIndex < bodies.length
@@ -282,27 +359,37 @@ class _MarkdownViewState extends State<MarkdownView> {
     final hlColor = theme.brightness == Brightness.dark
         ? Colors.white.withValues(alpha: 0.10)
         : Colors.black.withValues(alpha: 0.07);
+
+    Widget band(Widget child) => DecoratedBox(
+          decoration: BoxDecoration(
+            color: hlColor,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: child,
+        );
+
+    // 句级高亮：句片铺开，当前句整条灰底（句片零间隙=段落视觉连续）
+    Widget sentenceHighlight(int i) {
+      final sentences = _spSentences[i];
+      final si = widget.speakSentenceIndex;
+      if (sentences != null && si >= 0 && si < sentences.length) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var s = 0; s < sentences.length; s++)
+              if (s == si) band(sentences[s]) else sentences[s],
+          ],
+        );
+      }
+      return band(bodies[i]);
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (var i = 0; i < bodies.length; i++) ...[
           if (i > 0) const SizedBox(height: 8),
-          if (i == hi)
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: hlColor,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 6,
-                  vertical: 3,
-                ),
-                child: bodies[i],
-              ),
-            )
-          else
-            bodies[i],
+          if (i == hi) sentenceHighlight(i) else bodies[i],
         ],
       ],
     );

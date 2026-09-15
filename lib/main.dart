@@ -463,6 +463,10 @@ class _HomePageState extends State<HomePage>
   ///（块 = splitMarkdownBlocks 切分，与渲染共用同一函数）
   (Message, int, List<int>)? _speakingSeg;
 
+  /// 句级高亮：当前块内读到第几句（-1 = 整块高亮/非散文块/无词戳）。
+  /// 播放位置 → WordBoundary 词 → 词流对齐回显示文本句子
+  int _speakingSent = -1;
+
   /// 消息 m 当前朗读到的块号（无朗读/越界返回 -1）——气泡传给
   /// MarkdownView 做灰底高亮
   int _speakBlockOf(Message m) {
@@ -471,6 +475,10 @@ class _HomePageState extends State<HomePage>
     if (s.$2 < 0 || s.$2 >= s.$3.length) return -1;
     return s.$3[s.$2];
   }
+
+  /// 消息 m 当前朗读到的句号（仅高亮块为散文块且词戳可用时 ≥0）
+  int _speakSentenceOf(Message m) =>
+      identical(_speakingSeg?.$1, m) ? _speakingSent : -1;
 
   /// 朗读会话号：停止/切消息时自增——旧管道据此自杀
   int _speakSession = 0;
@@ -494,6 +502,7 @@ class _HomePageState extends State<HomePage>
     if (_speakingMsg == null) return;
     _speakingMsg = null;
     _speakingSeg = null;
+    _speakingSent = -1;
     _speakSession++;
     _audioPlayer?.stop();
     if (mounted) setState(() {});
@@ -501,18 +510,25 @@ class _HomePageState extends State<HomePage>
 
   /// Edge TTS 朗读（免密钥）
   Future<void> _speakViaEdge(Message m) async {
-    final (segs, segBlocks) = _speakSegments(_displayCached(m.displayContent));
+    final (segs, segBlocks, segSentences) =
+        _speakSegments(_displayCached(m.displayContent));
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
     final voice = _general.ttsVoice.trim().isEmpty
         ? 'zh-CN-XiaoxiaoNeural'
         : _general.ttsVoice.trim();
-    await _speakQueue(m, segs, segBlocks, (seg) => EdgeTts.synth(
-          seg,
-          rate: _general.ttsSpeed,
-          voice: voice,
-        ));
+    await _speakQueue(
+      m,
+      segs,
+      segBlocks,
+      segSentences,
+      (seg) => EdgeTts.synth(
+        seg,
+        rate: _general.ttsSpeed,
+        voice: voice,
+      ),
+    );
   }
 
   /// 朗读分段（Kimi 架构：客户端零裁剪，间距由合成端产出）：
@@ -522,8 +538,11 @@ class _HomePageState extends State<HomePage>
   /// 队列项=块 → currentIndex 即块号，高亮免映射。
   /// 超长块（罕见：整段长文/拍平大表）按句切，防单请求过大——
   /// 阈值放宽到 1200：合并后的长列表尽量保持单块（拆开=逐项请求
-  /// 的停顿感又回来了）
-  (List<String>, List<int>) _speakSegments(String display) {
+  /// 的停顿感又回来了）。
+  /// 单项块的散文句列表一并返回（句级高亮用，与渲染共用切分函数）
+  (List<String>, List<int>, List<List<String>?>) _speakSegments(
+    String display,
+  ) {
     final data = _general.latexEnabled ? preprocessLatex(display) : display;
     final blocks = splitMarkdownBlocks(data);
     final segs = <String>[];
@@ -541,7 +560,49 @@ class _HomePageState extends State<HomePage>
         segBlocks.add(b);
       }
     }
-    return (segs, segBlocks);
+    // 句级高亮仅对「单项散文块」启用（多项块句子跨项，无从对齐）
+    final itemsPerBlock = <int, int>{};
+    for (final b in segBlocks) {
+      itemsPerBlock[b] = (itemsPerBlock[b] ?? 0) + 1;
+    }
+    final segSentences = List<List<String>?>.filled(segs.length, null);
+    for (var i = 0; i < segs.length; i++) {
+      final b = segBlocks[i];
+      if (itemsPerBlock[b] == 1) {
+        segSentences[i] = splitProseSentences(blocks[b]);
+      }
+    }
+    return (segs, segBlocks, segSentences);
+  }
+
+  /// 词流对齐句子起点：句子归一化前缀在词流平铺串中按序定位，
+  /// 返回每句首词号（对不上的句子 -1，定位时沿用上一句状态）。
+  /// 词文本是 TTS 预处理后的产物，显示句的 markdown 残留字符剥掉再探
+  List<int> _sentenceStartWords(List<String> sentences, List<TtsWord> words) {
+    final flat = StringBuffer();
+    final owner = <int>[];
+    for (var i = 0; i < words.length; i++) {
+      final t = words[i].text.replaceAll(RegExp(r'\s'), '');
+      for (var c = 0; c < t.length; c++) {
+        flat.write(t[c]);
+        owner.add(i);
+      }
+    }
+    final s = flat.toString();
+    final starts = List<int>.filled(sentences.length, -1);
+    var ptr = 0;
+    for (var si = 0; si < sentences.length; si++) {
+      final norm = sentences[si]
+          .replaceAll(RegExp(r'\s'), '')
+          .replaceFirst(RegExp(r'^[#>*\-]+'), '');
+      if (norm.isEmpty) continue;
+      final probe = norm.substring(0, norm.length < 3 ? norm.length : 3);
+      final at = s.indexOf(probe, ptr);
+      if (at < 0) continue;
+      starts[si] = owner[at];
+      ptr = at + probe.length;
+    }
+    return starts;
   }
 
   /// 播放队列（Kimi/ExoPlayer 同款）：单播放器 + ConcatenatingAudioSource
@@ -552,20 +613,71 @@ class _HomePageState extends State<HomePage>
     Message m,
     List<String> segs,
     List<int> segBlocks,
-    Future<Uint8List> Function(String) synth,
+    List<List<String>?> segSentences,
+    Future<TtsSynth> Function(String) synth,
   ) async {
     final session = _speakSession;
     final player = _audioPlayer ??= AudioPlayer();
     await player.stop();
+    // 每项的词时间戳：句级高亮的时间轴（首项合成即得，其余随喂队列入）
+    final itemWords = List<List<TtsWord>?>.filled(segs.length, null);
+    final first = await synth(segs[0]);
+    itemWords[0] = first.words;
     final playlist = ConcatenatingAudioSource(
-      children: [_BytesAudioSource(await synth(segs[0]))],
+      children: [_BytesAudioSource(first.audio)],
     );
     await player.setAudioSource(playlist, initialIndex: 0);
+    // 词→句起点缓存（懒算：词戳+句列表都到位才算）
+    final sentStarts = <int, List<int>>{};
+    List<int> startsFor(int idx) => sentStarts.putIfAbsent(idx, () {
+          final words = itemWords[idx];
+          final sentences =
+              idx < segSentences.length ? segSentences[idx] : null;
+          if (words == null ||
+              words.isEmpty ||
+              sentences == null ||
+              sentences.isEmpty) {
+            return const [];
+          }
+          return _sentenceStartWords(sentences, words);
+        });
     // 分段定位：队列播到哪段 → 气泡里对应块加灰底
+    var curIdx = 0;
     final segSub = player.currentIndexStream.listen((idx) {
       if (session != _speakSession || idx == null || mounted == false) return;
+      curIdx = idx;
+      _speakingSent = -1;
       setState(() => _speakingSeg = (m, idx, segBlocks));
     });
+    // 句级定位（Kimi RawText 同思路）：播放位置 → WordBoundary 当前词
+    // → 词流对齐回显示句子 → 当前句加灰底。positionStream 高频触发，
+    // 仅句号变化才 setState
+    final posSub = player.positionStream.listen((pos) {
+      if (session != _speakSession || mounted == false) return;
+      final words = itemWords[curIdx];
+      if (words == null || words.isEmpty) return;
+      final starts = startsFor(curIdx);
+      if (starts.isEmpty) return;
+      final p = pos.inMilliseconds;
+      var w = 0;
+      for (var i = 0; i < words.length; i++) {
+        if (words[i].startMs <= p) {
+          w = i;
+        } else {
+          break;
+        }
+      }
+      var sent = -1;
+      for (var si = 0; si < starts.length; si++) {
+        if (starts[si] >= 0 && starts[si] <= w) sent = si;
+      }
+      if (sent != _speakingSent &&
+          _speakingSeg?.$1 == m &&
+          _speakingSeg?.$2 == curIdx) {
+        setState(() => _speakingSent = sent);
+      }
+    });
+    _speakingSent = -1;
     setState(() => _speakingSeg = (m, 0, segBlocks));
     // 后台喂队列：双并发预合成、严格按序入队——串行合成时短块
     //（标题/列表项）播完而下一长块未就绪会硬停顿；并发窗口 2
@@ -575,7 +687,7 @@ class _HomePageState extends State<HomePage>
         const window = 2;
         var issued = 1;
         var added = 1;
-        final slots = <int, Future<Uint8List>>{};
+        final slots = <int, Future<TtsSynth>>{};
         while (added < segs.length) {
           while (slots.length < window && issued < segs.length) {
             final i = issued++;
@@ -588,9 +700,10 @@ class _HomePageState extends State<HomePage>
           final f = slots.remove(added);
           if (f == null) return;
           try {
-            final bytes = await f;
+            final r = await f;
             if (session != _speakSession) return;
-            await playlist.add(_BytesAudioSource(bytes));
+            if (r.words.isNotEmpty) itemWords[added] = r.words;
+            await playlist.add(_BytesAudioSource(r.audio));
           } catch (e) {
             if (session == _speakSession) {
               _toast('语音合成失败：$e');
@@ -622,8 +735,10 @@ class _HomePageState extends State<HomePage>
     } finally {
       await sub.cancel();
       await segSub.cancel();
+      await posSub.cancel();
       if (session == _speakSession && _speakingSeg?.$1 == m) {
         _speakingSeg = null;
+        _speakingSent = -1;
         if (mounted) setState(() {});
       }
     }
@@ -645,11 +760,19 @@ class _HomePageState extends State<HomePage>
       _toast('未配置语音 API 地址（设置 → 语音朗读）');
       return;
     }
-    final (segs, segBlocks) = _speakSegments(_displayCached(m.displayContent));
+    final (segs, segBlocks, segSentences) =
+        _speakSegments(_displayCached(m.displayContent));
     if (segs.isEmpty) return;
     final session = ++_speakSession;
     setState(() => _speakingMsg = m);
-    await _speakQueue(m, segs, segBlocks, _synthSegment);
+    // API 路径无词时间戳 → 句级高亮自动降级为块级
+    await _speakQueue(
+      m,
+      segs,
+      segBlocks,
+      segSentences,
+      (seg) async => TtsSynth(await _synthSegment(seg), const []),
+    );
   }
 
   /// 合成一小段（OpenAI 兼容 /audio/speech → MP3 字节）
@@ -6168,6 +6291,7 @@ class _HomePageState extends State<HomePage>
                               mermaidEnabled: _general.mermaidEnabled,
                               artifactsEnabled: _general.artifactsEnabled,
                               speakBlockIndex: _speakBlockOf(m),
+                              speakSentenceIndex: _speakSentenceOf(m),
                             )
                           : SelectableText(
                               _displayCached(m.displayContent),
@@ -7374,6 +7498,7 @@ class _HomePageState extends State<HomePage>
                   mermaidEnabled: _general.mermaidEnabled,
                   artifactsEnabled: _general.artifactsEnabled,
                   speakBlockIndex: _speakBlockOf(m),
+                  speakSentenceIndex: _speakSentenceOf(m),
                 )
               : SelectableText(
                   _displayCached(m.displayContent),

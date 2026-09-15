@@ -2,6 +2,40 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:llm_ui/markdown_view.dart';
 
 void main() {
+  group('splitProseSentences（朗读句级高亮切分）', () {
+    test('中文句末标点断句', () {
+      final s = splitProseSentences('今天天气很好。我们去公园！走了多远？');
+      expect(s, ['今天天气很好。', '我们去公园！', '走了多远？']);
+    });
+
+    test('强调/行内代码内部不断句（标记不失衡）', () {
+      final s = splitProseSentences('**加粗。内部**结束。');
+      expect(s, ['**加粗。内部**结束。']);
+      final s2 = splitProseSentences('代码 `foo(); bar()` 结束。后一句。');
+      expect(s2, ['代码 `foo(); bar()` 结束。', '后一句。']);
+    });
+
+    test('ASCII 问号仅在后随空白/CJK 时断句（URL 不切断）', () {
+      final s = splitProseSentences('看这个 https://x.com/a?b=1 对吗？好的。');
+      expect(s!.length, 2);
+      expect(s.first, contains('?b=1'));
+    });
+
+    test('含围栏/表格/列表行的块返回 null（整块高亮）', () {
+      expect(splitProseSentences('```dart\ncode\n```'), isNull);
+      expect(splitProseSentences('| a | b |\n| - | - |'), isNull);
+      expect(splitProseSentences('- 列表项。'), isNull);
+    });
+
+    test('无句末标点的整段为一句', () {
+      final s = splitProseSentences('一段没有标点结尾的文字');
+      expect(s, ['一段没有标点结尾的文字']);
+    });
+
+    test('空块返回 null', () {
+      expect(splitProseSentences('  \n '), isNull);
+    });
+  });
   test('空行切块：段落各自成块', () {
     final blocks = splitMarkdownBlocks('第一段。\n\n第二段。\n\n第三段。');
     expect(blocks, ['第一段。', '第二段。', '第三段。']);
