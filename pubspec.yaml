@@ -54,8 +54,6 @@ dependencies:
   geolocator: ^14.0.2
   pdfrx: 1.1.1
   path_provider: ^2.1.6
-  crypto: ^3.0.6
-  web_socket_channel: ^3.0.2
   just_audio: ^0.10.6
   image: ^4.9.2
   flutter_image_compress: ^2.5.1

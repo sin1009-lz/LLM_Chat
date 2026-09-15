@@ -519,8 +519,10 @@ class _HomePageState extends State<HomePage>
         await player.play();
       }
     } catch (e) {
+      // ignore: avoid_print
+      print('TTSDIAG ${e.toString()}');
       if (session == _speakSession) {
-        _toast('免费语音失败（可能是地区限制）：$e，可配置在线语音 API');
+        _toast('免费语音失败：$e');
       }
     } finally {
       if (session == _speakSession) {

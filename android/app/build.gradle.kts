@@ -39,6 +39,11 @@ android {
     }
 }
 
+dependencies {
+    // Edge TTS WebSocket：Dart TLS 指纹被微软 403，OkHttp 指纹放行
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
