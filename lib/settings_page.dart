@@ -3664,6 +3664,143 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                   ),
                 ),
               ),
+              const SizedBox(height: 12),
+
+              // ── 渲染 ──
+              _sectionLabel('渲染'),
+              _switchTile(
+                context,
+                icon: Icons.article_outlined,
+                title: 'Markdown 渲染',
+                subtitle: '消息正文按 Markdown 格式渲染',
+                value: _s.markdownEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(markdownEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              // 上下文占用百分比（默认只显示圆环；开启后百分比显示在圆环右侧）
+              _switchTile(
+                context,
+                icon: Icons.donut_large,
+                title: '上下文占用百分比',
+                subtitle: '在输出气泡的上下文占用圆环右侧显示百分比',
+                value: _s.contextPercent,
+                onChanged: (v) => _update((s) => s.copyWith(contextPercent: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.functions,
+                title: 'LaTeX 渲染',
+                subtitle: '识别 \$...\$ 与 \$\$...\$\$ 数学公式',
+                value: _s.latexEnabled,
+                onChanged: (v) => _update((s) => s.copyWith(latexEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.account_tree_outlined,
+                title: 'Mermaid 图表',
+                subtitle: '渲染 mermaid 代码块为流程图',
+                value: _s.mermaidEnabled,
+                onChanged: (v) => _update((s) => s.copyWith(mermaidEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.preview_outlined,
+                title: 'Artifacts 预览',
+                subtitle: '自动预览 HTML/SVG 代码块的生成物',
+                value: _s.artifactsEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(artifactsEnabled: v)),
+              ),
+              const SizedBox(height: 20),
+
+              // ── 内置工具 ──
+              _sectionLabel('内置工具'),
+              _switchTile(
+                context,
+                icon: Icons.build_outlined,
+                title: '内置工具',
+                subtitle: '启用后模型可调用以下工具（可单独开关）',
+                value: _s.builtinToolsEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinToolsEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.schedule,
+                title: '获取当前时间',
+                subtitle: 'builtin__get_current_time',
+                // 子开关与总开关相互独立：各自记忆并始终可操作
+                value: _s.builtinTimeEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinTimeEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.location_on_outlined,
+                title: '获取地理位置',
+                subtitle: 'builtin__get_location（需定位权限）',
+                value: _s.builtinLocationEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinLocationEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              _switchTile(
+                context,
+                icon: Icons.travel_explore,
+                title: '联网搜索',
+                subtitle: 'builtin__web_search（DeepSeek 原生搜索）',
+                value: _s.builtinSearchEnabled,
+                onChanged: (v) =>
+                    _update((s) => s.copyWith(builtinSearchEnabled: v)),
+              ),
+              const SizedBox(height: 12),
+              Material(
+                color: _buttonColor(context),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: _projectInput(
+                    context: context,
+                    controller: _reactRoundsCtrl,
+                    label: '工具循环上限（轮）',
+                    hint: '默认 6，范围 2-20',
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) {
+                      final n = int.tryParse(v);
+                      if (n != null && n >= 2 && n <= 20) {
+                        _update((s) => s.copyWith(reactMaxRounds: n));
+                      }
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  '模型自主调用工具（搜索/时间/位置/MCP）的最大迭代轮数；'
+                  '上限越高模型可进行更多轮搜索，同时消耗更多 token。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  '可在输入栏加号面板中按对话单独开启/关闭内置工具。',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
               const SizedBox(height: 20),
 
               // ── 归档 ──
