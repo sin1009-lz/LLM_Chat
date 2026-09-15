@@ -11354,7 +11354,7 @@ class _BytesAudioSource extends StreamAudioSource {
         contentLength: (end ?? _bytes.length) - (start ?? 0),
         offset: start ?? 0,
         stream: Stream.value(_bytes.sublist(start ?? 0, end ?? _bytes.length)),
-        contentType: 'audio/wav',
+        contentType: 'audio/mpeg',
       );
 }
 
