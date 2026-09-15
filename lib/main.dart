@@ -11377,13 +11377,10 @@ Future<void> _playSegmentToCompletion(AudioPlayer player) async {
     }
   });
   try {
-    final playFuture = player.play();
-    // 三路会合：play() 完成 / completed 事件 / 双保险——谁先真完成
-    // 谁放行。play() 完成但 completed 未到（提前返回）：再等事件；
-    // completed 先到（事件快于 Future）：立即放行衔接下一段
-    await playFuture.whenComplete(() {
-      if (completed && !finished.isCompleted) finished.complete();
-    });
+    // 双信号全等待：completed 事件先到就切会产生重音（ExoPlayer 的
+    // completed 事件略早于音频真正放完，上段尾巴叠着下段开头）。
+    // 双播放器预装后这里的等待不再付出解码间隙，只等两个信号收齐
+    await player.play();
     if (!completed) await finished.future;
   } finally {
     await sub.cancel();
