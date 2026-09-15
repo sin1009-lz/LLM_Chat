@@ -486,7 +486,7 @@ class _HomePageState extends State<HomePage>
 
   /// Edge TTS 朗读（免密钥）：复用伪流式管道（分段合成 + 预取）
   Future<void> _speakViaEdge(Message m) async {
-    final text = applyDisplayRules(m.content, _replaceRules).trim();
+    final text = _ttsPrepText(applyDisplayRules(m.content, _replaceRules));
     if (text.isEmpty) return;
     final segs = _splitForTts(text, maxTotal: 3000);
     if (segs.isEmpty) return;
@@ -545,7 +545,7 @@ class _HomePageState extends State<HomePage>
       _toast('未配置语音 API 地址（设置 → 语音朗读）');
       return;
     }
-    final text = applyDisplayRules(m.content, _replaceRules).trim();
+    final text = _ttsPrepText(applyDisplayRules(m.content, _replaceRules));
     if (text.isEmpty) return;
     final segs = _splitForTts(text, maxTotal: 3000);
     if (segs.isEmpty) return;
@@ -603,6 +603,106 @@ class _HomePageState extends State<HomePage>
       throw Exception('HTTP ${resp.statusCode}');
     }
     return resp.bodyBytes;
+  }
+
+
+  /// TTS 预处理：Markdown → 可朗读文本（Pipecat MarkdownTextFilter 同思路）。
+  /// 块级：围栏代码块 →「代码」占位；表格 → 按行拍平横向读（跳过分隔行）。
+  /// 行内：图片删、链接留文字、强调/标题/引用标记删、行内代码留内容、
+  /// LaTeX →「公式」、裸 URL 删、emoji 剥、空白压缩
+  String _ttsPrepText(String src) {
+    final lines = src.split('\n');
+    final out = <String>[];
+    var inFence = false;
+    var fenceMark = '';
+    for (var i = 0; i < lines.length; i++) {
+      final t = lines[i].trimRight();
+      final fence = RegExp(r'^\s*(`{3,}|~{3,})').firstMatch(t);
+      if (fence != null) {
+        if (!inFence) {
+          inFence = true;
+          fenceMark = fence.group(1)![0];
+          out.add('「代码」');
+        } else if (t.trimLeft().startsWith(fenceMark)) {
+          inFence = false;
+        }
+        continue;
+      }
+      if (inFence) continue;
+      // 表格：含 | 的行 → 收集整块拍平横向读（跳过分隔行）
+      if (RegExp(r'\|.*\|').hasMatch(t)) {
+        var j = i;
+        final cells = <String>[];
+        while (j < lines.length) {
+          final lj = lines[j].trim();
+          if (!RegExp(r'\|.*\|').hasMatch(lj)) break;
+          final isSep = RegExp(r'^\|?[\s:|-]+\|?$').hasMatch(lj);
+          if (!isSep) {
+            for (final cell in lj.split('|')) {
+              final c = cell.trim();
+              if (c.isNotEmpty) cells.add(_ttsInline(c));
+            }
+          }
+          j++;
+        }
+        if (cells.isNotEmpty) out.add(cells.join('，'));
+        i = j - 1;
+        continue;
+      }
+      out.add(_ttsInline(t));
+    }
+    var text = out.join('\n');
+    text = text.replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
+    return text;
+  }
+
+  /// 行内剥壳：LaTeX/图片/链接/行内代码/强调/标题/引用/URL/emoji
+  String _ttsInline(String t) {
+    var x = t;
+    // LaTeX（先于其他，防 $ 干扰）
+    x = x
+        .replaceAll(RegExp(r'(?s)\$\$.+?\$\$'), '，公式，')
+        .replaceAll(RegExp(r'\$[^$\n]+\$'), '公式')
+        .replaceAll(RegExp(r'(?s)\\(.+?\\)'), '，公式，')
+        .replaceAll(RegExp(r'(?s)\\[.+?\\]'), '，公式，');
+    // 图片 → 删；链接 → 留文字
+    x = x.replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '');
+    x = x.replaceAllMapped(
+      RegExp(r'\[([^\]]*)\]\([^)]*\)'),
+      (m) => m.group(1) ?? '',
+    );
+    x = x.replaceAllMapped(
+      RegExp(r'\[([^\]]+)\]\[[^\]]*\]'),
+      (m) => m.group(1) ?? '',
+    );
+    // 行内代码 → 内容
+    x = x.replaceAllMapped(RegExp(r'`([^`]*)`'), (m) => m.group(1) ?? '');
+    // 强调/标题/引用
+    x = x
+        .replaceAllMapped(
+          RegExp(r'\*\*([^*]+)\*\*'),
+          (m) => m.group(1) ?? '',
+        )
+        .replaceAllMapped(RegExp(r'__([^_]+)__'), (m) => m.group(1) ?? '')
+        .replaceAllMapped(
+          RegExp(r'(?<!\*)\*(?!\*)([^*]+?)\*(?!\*)'),
+          (m) => m.group(1) ?? '',
+        )
+        .replaceAllMapped(RegExp(r'~~([^~]+)~~'), (m) => m.group(1) ?? '')
+        .replaceAll(RegExp(r'^#{1,6}\s+'), '')
+        .replaceAll(RegExp(r'^>\s?'), '');
+    // 裸 URL → 删
+    x = x.replaceAll(
+      RegExp(r'https?://[\w\-.,@?^=%&:/~+#]*[\w\-@^=%&/~+#]'),
+      '',
+    );
+    // emoji 区段剥离
+    final emoji = RegExp(
+      '[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]',
+      unicode: true,
+    );
+    x = x.replaceAll(emoji, '');
+    return x.trim();
   }
 
   /// TTS 分段：换行/强标点（。！？；）优先断句，短句向后聚合到
