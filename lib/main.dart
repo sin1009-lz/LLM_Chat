@@ -661,10 +661,10 @@ class _HomePageState extends State<HomePage>
     var x = t;
     // LaTeX（先于其他，防 $ 干扰）
     x = x
-        .replaceAll(RegExp(r'(?s)\$\$.+?\$\$'), '，公式，')
-        .replaceAll(RegExp(r'\$[^$\n]+\$'), '公式')
-        .replaceAll(RegExp(r'(?s)\\(.+?\\)'), '，公式，')
-        .replaceAll(RegExp(r'(?s)\\[.+?\\]'), '，公式，');
+        .replaceAll(RegExp(r'\$\$.+?\$\$', dotAll: true), '，公式，')
+        .replaceAll(RegExp(r'\$[^$\n]+\$', dotAll: true), '公式')
+        .replaceAll(RegExp(r'\\(.+?\\)', dotAll: true), '，公式，')
+        .replaceAll(RegExp(r'\\[.+?\\]', dotAll: true), '，公式，');
     // 图片 → 删；链接 → 留文字
     x = x.replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '');
     x = x.replaceAllMapped(
@@ -696,10 +696,15 @@ class _HomePageState extends State<HomePage>
       RegExp(r'https?://[\w\-.,@?^=%&:/~+#]*[\w\-@^=%&/~+#]'),
       '',
     );
-    // emoji 区段剥离
+    // emoji 剥离：辅助区段逐段构造（raw string 的 \u{} 字面量在
+    // 部分 Irregexp 版本报 Range out of order；fromCharCode 稳）
     final emoji = RegExp(
-      '[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]',
-      unicode: true,
+      '['
+      '${String.fromCharCode(0x1F300)}-${String.fromCharCode(0x1FAFF)}'
+      '${String.fromCharCode(0x2600)}-${String.fromCharCode(0x27BF)}'
+      '${String.fromCharCode(0xFE0F)}'
+      '${String.fromCharCode(0x200D)}'
+      ']',
     );
     x = x.replaceAll(emoji, '');
     return x.trim();
