@@ -142,6 +142,10 @@ class MainActivity : FlutterActivity() {
                             replyOnce {
                                 if (bytes.isEmpty()) result.error("empty", "no audio", null)
                                 else {
+                                    android.util.Log.d(
+                                        "TTSDIAG",
+                                        "audio=${bytes.size}B words=${words.size}",
+                                    )
                                     val out = HashMap<String, Any>()
                                     out["audio"] = bytes.toByteString().toByteArray()
                                     out["words"] = words.toList()
@@ -152,20 +156,26 @@ class MainActivity : FlutterActivity() {
                     } else if (header.contains("Path:audio.metadata") ||
                         header.contains("Path:response")
                     ) {
-                        // 词时间戳：新版 metadata[].data / 旧版 audioMetadata[]
+                        // 词时间戳：实测键名为大写开头（Metadata/Type/Data/
+                        // Offset/Duration，text.Text 小大写混用）——小写按
+                        // 兜底处理；解析失败不影响音频回传（句级高亮降级）
                         try {
                             val root = org.json.JSONObject(body)
-                            val arr = root.optJSONArray("metadata")
+                            val arr = root.optJSONArray("Metadata")
+                                ?: root.optJSONArray("metadata")
                                 ?: root.optJSONArray("audioMetadata")
                             if (arr != null) {
                                 for (k in 0 until arr.length()) {
                                     val e = arr.getJSONObject(k)
-                                    if (e.optString("type") != "WordBoundary") continue
-                                    val d = e.optJSONObject("data") ?: e
+                                    val typeStr = e.optString("Type", e.optString("type"))
+                                    if (typeStr != "WordBoundary") continue
+                                    val d = e.optJSONObject("Data")
+                                        ?: e.optJSONObject("data")
+                                        ?: e
                                     val txt = d.optJSONObject("text")
                                         ?.optString("Text").orEmpty()
-                                    val off = d.optLong("offset", d.optLong("Offset", -1))
-                                    val dur = d.optLong("duration", d.optLong("Duration", 0))
+                                    val off = d.optLong("Offset", d.optLong("offset", -1))
+                                    val dur = d.optLong("Duration", d.optLong("duration", 0))
                                     if (off < 0 || txt.isEmpty()) continue
                                     val w = HashMap<String, Any>()
                                     w["start"] = (off / 10000).toInt()  // 100ns → ms

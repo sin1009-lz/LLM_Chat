@@ -26,9 +26,10 @@ class TtsSynth {
 class EdgeTts {
   static const _ch = MethodChannel('llm/edge_tts');
 
-  /// Azure/Edge 词时间戳恒定偏早修正（edge-tts 社区字幕实测 8750000
-  /// 100ns ticks ≈ 0.875s）：不修则高亮比语音早约一秒
-  static const _wordBiasMs = 875;
+  /// 词时间戳恒定偏早修正：实测（真实服务合成 + 解码测语音起点）
+  /// 偏差 ≈85ms——编码器 delay + 分析窗。社区流传的 875ms 常数来自
+  /// Azure SDK 字幕场景，实测不适用于本端点（会反向偏晚 ~0.8s）
+  static const _wordBiasMs = 85;
 
   /// 合成一段文本 → (MP3 字节, 逐词时间戳)。[voice] 形如
   /// zh-CN-XiaoxiaoNeural；[rate] 语速（1.0 = 常速）
