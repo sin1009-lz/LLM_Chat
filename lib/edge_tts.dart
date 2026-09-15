@@ -14,7 +14,7 @@ class EdgeTts {
   static const _trustedToken = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
   static const _ua =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-      '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0';
+      '(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0';
 
   /// Sec-MS-GEC 令牌：Windows FILETIME 向下取整 5 分钟 + "800" +
   /// 受信令牌拼接后的 SHA256 大写十六进制（edge-tts drm.py 同款）
@@ -62,13 +62,16 @@ class EdgeTts {
       Uri.parse(
         'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud'
         '/edge/v1?TrustedClientToken=$_trustedToken'
-        '&Sec-MS-GEC=${_gec()}&Sec-MS-GEC-Version=1-130.0.2849.68'
+        '&Sec-MS-GEC=${_gec()}&Sec-MS-GEC-Version=1-143.0.3650.75'
         '&ConnectionId=${_rid()}',
       ),
       headers: {
+        'Pragma': 'no-cache',
+        'Cache-Control': 'no-cache',
         'Origin': 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
         'User-Agent': _ua,
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Accept-Language': 'en-US,en;q=0.9',
       },
     );
 
