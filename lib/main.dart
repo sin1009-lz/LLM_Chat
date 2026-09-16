@@ -33,6 +33,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'chat.dart';
 import 'edge_tts.dart';
+import 'stt_service.dart';
 import 'doc_extract.dart';
 import 'general_settings.dart';
 import 'ui_tokens.dart';
@@ -5601,6 +5602,10 @@ class _HomePageState extends State<HomePage>
             onPasteAsFile: _onPasteAsFile,
             pasteLongTextAsFile: _general.pasteLongTextAsFile,
             pasteThreshold: _general.pasteThreshold,
+            // 语音输入起播前停朗读（麦克风会拾到外放声）
+            onSttStart: () {
+              if (_speakingMsg != null) _stopSpeaking();
+            },
             thinkingDepth: _thinkingDepth,
             onThinkingDepthChanged: (depth) {
               // 面板滑动条与抽屉栏按钮共用同一状态：立即生效 + 持久化
@@ -8787,6 +8792,7 @@ class _GlassInputBar extends StatefulWidget {
     required this.modelSupportsThinking,
     required this.hasAttachments,
     required this.attachmentsAllLoading,
+    this.onSttStart,
   });
 
   /// 加号面板：选择图片 / 文件（由 HomePage 统一处理附件）
@@ -8858,6 +8864,9 @@ class _GlassInputBar extends StatefulWidget {
 
   /// 附件是否全部仍在压缩中（占位状态：发送按钮禁用）
   final bool attachmentsAllLoading;
+
+  /// 语音输入开始前回调（HomePage 停朗读——麦克风会拾到外放）
+  final VoidCallback? onSttStart;
 
   @override
   State<_GlassInputBar> createState() => _GlassInputBarState();
@@ -9158,12 +9167,65 @@ class _GlassInputBarState extends State<_GlassInputBar> {
   }
 
   /// 发送消息：把文本通过 onSend 上抛给 HomePage，清空输入框。
-  /// 可单独发送附件（无文字）
+  /// 可单独发送附件（无文字）；录音中先定稿停止
   void _sendMessage() {
+    if (_sttActive) {
+      _stopStt();
+    }
     final text = _controller.text.trim();
     if (text.isEmpty && !widget.hasAttachments) return;
     widget.onSend(text, const []);
     _controller.clear();
+    _syncActive();
+  }
+
+  // ── 语音输入（sherpa-onnx 本地流式 STT）──
+  bool _sttActive = false;
+  String _sttBase = '';
+
+  Future<void> _toggleStt() async {
+    if (_sttActive) {
+      await _stopStt();
+      return;
+    }
+    if (!await SttService.I.isReady) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('语音模型未下载：设置 → 语音输入')),
+      );
+      return;
+    }
+    widget.onSttStart?.call(); // 麦克风收音前停朗读（自拾音）
+    _sttBase = _controller.text.isEmpty ? '' : '${_controller.text}\n';
+    try {
+      await SttService.I.start((text) {
+        if (!mounted) return;
+        _controller.value = TextEditingValue(
+          text: _sttBase + text,
+          selection: TextSelection.collapsed(
+            offset: (_sttBase + text).length,
+          ),
+        );
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(
+          context,
+        )?.showSnackBar(SnackBar(content: Text('$e')));
+      }
+      return;
+    }
+    setState(() => _sttActive = true);
+  }
+
+  Future<void> _stopStt() async {
+    await SttService.I.stop();
+    if (!mounted) return;
+    setState(() => _sttActive = false);
+    // 收尾：光标到末尾，输入态同步
+    _controller.value = TextEditingValue(
+      text: _controller.text,
+      selection: TextSelection.collapsed(offset: _controller.text.length),
+    );
     _syncActive();
   }
 
@@ -9578,13 +9640,34 @@ class _GlassInputBarState extends State<_GlassInputBar> {
       textInputAction: TextInputAction.newline,
       style: Theme.of(context).textTheme.bodyLarge,
       decoration: InputDecoration(
-        hintText: '输入消息…',
+        hintText: _sttActive ? '正在听…' : '输入消息…',
         isDense: true,
         filled: true,
         fillColor: Colors.transparent, // 输入栏透明
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 16,
           vertical: 12,
+        ),
+        // 语音输入：录音中红色停止钮，空闲灰色麦克风（模型未下载点击提示）
+        suffixIcon: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _toggleStt,
+          child: Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Icon(
+              _sttActive ? Icons.stop_circle : Icons.keyboard_voice,
+              color: _sttActive
+                  ? Colors.red
+                  : Theme.of(
+                      context,
+                    ).colorScheme.onSurface.withValues(alpha: 0.45),
+              size: 24,
+            ),
+          ),
+        ),
+        suffixIconConstraints: const BoxConstraints(
+          minWidth: 36,
+          minHeight: 32,
         ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(20),
