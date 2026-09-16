@@ -1,5 +1,4 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 网络请求：测试连接 / 从 API 获取模型 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- 后台接收回复：前台服务（生成期间保活，防系统冻结断流） -->

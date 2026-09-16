@@ -23,7 +23,6 @@ import 'chat.dart'
         TextReplaceRule,
         parseMcpServersJson;
 import 'general_settings.dart';
-import 'stt_service.dart';
 import 'ui_tokens.dart';
 import 'mcp.dart' show McpClient;
 
@@ -430,15 +429,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   /// 进入语音朗读设置页
-    /// 语音输入（STT）模型管理：底部弹窗（就绪状态/下载进度/删除）
-  void _openStt() {
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (sheetCtx) => _SttModelSheet(),
-    );
-  }
-
-void _openTts() {
+  void _openTts() {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => _TtsSettingsPage(
@@ -616,28 +607,6 @@ void _openTts() {
               ),
             ),
             onTap: _openTts,
-          ),
-          const SizedBox(height: 12),
-          // 语音输入（STT）：本地流式识别模型下载管理
-          _projectTile(
-            context: context,
-            leading: Icon(
-              Icons.keyboard_voice_outlined,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-            title: Text(
-              '语音输入',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-            ),
-            subtitle: Text(
-              '本地离线识别·边说边出字（模型约 190MB）',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-            onTap: _openStt,
           ),
           const SizedBox(height: 12),
           // 归档对话管理：查看、恢复或永久删除归档的对话
@@ -4556,140 +4525,6 @@ class _TtsSettingsPageState extends State<_TtsSettingsPage> {
 
           const SizedBox(height: 24),
         ],
-      ),
-    );
-  }
-}
-
-/// ── 语音输入（STT）模型管理弹窗：就绪状态 / 下载（进度）/ 删除 ──
-class _SttModelSheet extends StatefulWidget {
-  @override
-  State<_SttModelSheet> createState() => _SttModelSheetState();
-}
-
-class _SttModelSheetState extends State<_SttModelSheet> {
-  bool _ready = false;
-  double _progress = -1; // -1 = 空闲，0..1 = 下载中
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _refresh();
-  }
-
-  Future<void> _refresh() async {
-    final ready = await SttService.I.isReady;
-    if (mounted) setState(() => _ready = ready);
-  }
-
-  Future<void> _download() async {
-    setState(() {
-      _error = null;
-      _progress = 0;
-    });
-    try {
-      await SttService.I.download(
-        (p) {
-          if (mounted) setState(() => _progress = p);
-        },
-      );
-      if (mounted) setState(() => _progress = -1);
-      await _refresh();
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _progress = -1;
-          _error = '$e';
-        });
-      }
-    }
-  }
-
-  Future<void> _delete() async {
-    await SttService.I.delete();
-    await _refresh();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final downloading = _progress >= 0;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '语音输入（本地离线识别）',
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => Navigator.of(context).maybePop(),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '流式识别模型（中英双语，约 190MB，下载后完全离线运行，'
-              '边说边出字）。存储在应用数据目录，卸载即清除。',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 16),
-            if (_error != null) ...[
-              Text(
-                _error!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.error,
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            if (downloading)
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(value: _progress),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '下载中 ${( _progress * 100).toStringAsFixed(0)}%'
-                    '（可断点续传，失败重试已下载文件不重复）',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
-              )
-            else
-              Row(
-                children: [
-                  FilledButton.icon(
-                    onPressed: _ready ? null : _download,
-                    icon: Icon(_ready ? Icons.check : Icons.download),
-                    label: Text(_ready ? '模型已就绪' : '下载模型'),
-                  ),
-                  const SizedBox(width: 12),
-                  if (_ready)
-                    TextButton(
-                      onPressed: _delete,
-                      child: const Text('删除模型'),
-                    ),
-                ],
-              ),
-          ],
-        ),
       ),
     );
   }
