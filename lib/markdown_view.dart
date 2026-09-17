@@ -369,14 +369,14 @@ class _MarkdownViewState extends State<MarkdownView> {
       return _buildSpeaking(context);
     }
     if (_stableText.isEmpty) {
-      return widget._buildBody(context, _tailText);
+      return widget._buildBody(context, _tailText, streaming: true);
     }
     if (_tailText.isEmpty) {
       return _stableChild;
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [_stableChild, widget._buildBody(context, _tailText)],
+      children: [_stableChild, widget._buildBody(context, _tailText, streaming: true)],
     );
   }
 
@@ -463,7 +463,8 @@ class _MarkdownViewState extends State<MarkdownView> {
 
 extension _MarkdownViewRender on MarkdownView {
   /// 渲染主体：[data] 为已预处理的 markdown 文本（稳定前缀/尾段共用）
-  Widget _buildBody(BuildContext context, String data) {
+  /// [streaming]：渲染的是流式活动尾段——代码块走防抖高亮路径
+  Widget _buildBody(BuildContext context, String data, {bool streaming = false}) {
     final theme = Theme.of(context);
     final textColor = isUser ? Colors.white : theme.colorScheme.onSurface;
     // 链接色：中性深灰（与整体无蓝紫体系一致）
@@ -484,6 +485,7 @@ extension _MarkdownViewRender on MarkdownView {
           mermaidEnabled: mermaidEnabled,
           artifactsEnabled: artifactsEnabled,
           isDark: theme.brightness == Brightness.dark,
+          streaming: streaming,
         ),
         if (latexEnabled) 'code': _InlineCodeBuilder(textColor: textColor),
       },
@@ -615,18 +617,157 @@ extension _MarkdownViewRender on MarkdownView {
 /// 统一代码块 builder（替换默认 pre 渲染）。
 /// 按语言分发：latex → Math.tex / mermaid → _MermaidDiagram /
 /// html/svg + artifactsEnabled → 代码高亮 + _ArtifactPreview / 其他 → 高亮
+/// 代码块（流式高亮防抖）：流式尾段里的开围栏每帧增长，若每次
+/// build 都全量 hl.highlight.parse（正则密集）+ 全量重排，几百行代码
+/// 就是每帧几十毫秒 = 流式卡顿。策略：
+/// - 内容变化时先渲染纯文本（单 TextSpan，零高亮成本）即时上屏
+/// - 停顿 300ms 无新内容才高亮一次；超 400 行流式中不再自动高亮
+/// - 非流式（稳定前缀/历史消息）构建即高亮，行为不变
+class _CodeBlock extends StatefulWidget {
+  const _CodeBlock({
+    required this.code,
+    required this.lang,
+    this.streaming = false,
+  });
+
+  final String code;
+  final String lang;
+  final bool streaming;
+
+  @override
+  State<_CodeBlock> createState() => _CodeBlockState();
+}
+
+class _CodeBlockState extends State<_CodeBlock> {
+  List<TextSpan>? _spans;
+  Timer? _debounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _spans = _parseHighlight();
+  }
+
+  List<TextSpan> _parseHighlight() {
+    final result = hl.highlight.parse(
+      widget.code.isEmpty ? ' ' : widget.code,
+      language: widget.lang.isEmpty ? 'plaintext' : widget.lang,
+    );
+    return _nodesToSpans(result.nodes ?? const []);
+  }
+
+  static List<TextSpan> _nodesToSpans(List<hl.Node> nodes) {
+    return [
+      for (final n in nodes)
+        TextSpan(
+          text: n.value,
+          children: (n.value == null && n.children != null)
+              ? _nodesToSpans(n.children!)
+              : null,
+          style: (n.className != null && n.className!.isNotEmpty)
+              ? () {
+                  final c = _hlColorStatic(
+                    n.className!.replaceFirst('hljs-', ''),
+                  );
+                  return c == null ? null : TextStyle(color: c);
+                }()
+              : null,
+        ),
+    ];
+  }
+
+  /// 与 _CodeBlockBuilder._hlColor 同表（保持两处配色一致）
+  static Color? _hlColorStatic(String cls) {
+    return switch (cls) {
+      'keyword' ||
+      'built_in' ||
+      'literal' ||
+      'meta' ||
+      'symbol' => const Color(0xFF569CD6),
+      'string' || 'regexp' || 'char' => const Color(0xFFCE9178),
+      'comment' || 'quote' => const Color(0xFF6A9955),
+      'number' => const Color(0xFFB5CEA8),
+      'title' ||
+      'function_' ||
+      'class_' ||
+      'type' ||
+      'selector-tag' ||
+      'attribute' => const Color(0xFFDCDCAA),
+      'params' || 'attr' => const Color(0xFF9CDCFE),
+      'name' || 'tag' || 'variable' => const Color(0xFF4EC9B0),
+      _ => null,
+    };
+  }
+
+  @override
+  void didUpdateWidget(_CodeBlock old) {
+    super.didUpdateWidget(old);
+    if (old.code == widget.code && old.lang == widget.lang) return;
+    _debounce?.cancel();
+    if (!widget.streaming) {
+      // 非流式（稳定前缀重挂/历史）：立即高亮
+      _spans = _parseHighlight();
+      return;
+    }
+    // 流式中：先退化纯文本（本次 build 即生效），停顿后高亮
+    final lineCount = widget.code.split('\n').length;
+    if (lineCount > 400) return; // 超长流式块：完成前保持纯文本
+    _debounce = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      setState(() => _spans = _parseHighlight());
+    });
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final spans = _spans;
+    final text = widget.code.isEmpty ? ' ' : widget.code;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: SelectableText.rich(
+        TextSpan(
+          style: const TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 12.5,
+            height: 1.5,
+            color: Color(0xFFD4D4D4),
+          ),
+          // 纯文本路径：单 span 承载全文（高亮挂起/防抖窗口中）
+          children: spans ?? [TextSpan(text: text)],
+        ),
+      ),
+    );
+  }
+}
+
 class _CodeBlockBuilder extends MarkdownElementBuilder {
   _CodeBlockBuilder({
     required this.textColor,
     required this.mermaidEnabled,
     required this.artifactsEnabled,
     required this.isDark,
+    this.streaming = false,
   });
 
   final Color textColor;
   final bool mermaidEnabled;
   final bool artifactsEnabled;
   final bool isDark;
+
+  /// 处于流式尾段：代码块高亮防抖（纯文本即时上屏，停顿后高亮）
+  final bool streaming;
 
   @override
   bool isBlockElement() => true;
@@ -660,7 +801,7 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
       return _MermaidDiagram(
         source: code,
         isDark: isDark,
-        fallback: _highlightBlock(code, 'mermaid'),
+        fallback: _highlightBlock(code, 'mermaid', streaming: streaming),
       );
     }
 
@@ -669,14 +810,14 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _highlightBlock(code, lang),
+          _highlightBlock(code, lang, streaming: streaming),
           const SizedBox(height: 8),
           _ArtifactPreview(code: code, language: lang, isDark: isDark),
         ],
       );
     }
 
-    return _highlightBlock(code, lang);
+    return _highlightBlock(code, lang, streaming: streaming);
   }
 
   /// LaTeX block 公式渲染（沉浸式居中，无独立背景；解析失败显示原始文本）
@@ -700,28 +841,10 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
     );
   }
 
-  /// 普通代码块高亮（深色块 + VS Code Dark+ 配色）
-  Widget _highlightBlock(String code, String lang) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E1E1E),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: SelectableText.rich(
-        TextSpan(
-          style: const TextStyle(
-            fontFamily: 'monospace',
-            fontSize: 12.5,
-            height: 1.5,
-            color: Color(0xFFD4D4D4),
-          ),
-          children: _highlight(code, lang),
-        ),
-      ),
-    );
+  /// 普通代码块高亮（深色块 + VS Code Dark+ 配色）。
+  /// [streaming]：处于流式尾段——高亮防抖（见 _CodeBlock）
+  Widget _highlightBlock(String code, String lang, {bool streaming = false}) {
+    return _CodeBlock(code: code, lang: lang, streaming: streaming);
   }
 
   List<TextSpan> _highlight(String code, String lang) {
