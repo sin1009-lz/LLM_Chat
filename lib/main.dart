@@ -1918,6 +1918,10 @@ class _HomePageState extends State<HomePage>
             '在设备本地沙箱中运行 Python 代码（Pyodide，含 numpy/pandas/matplotlib/'
             'scipy/sympy 等科学计算包，无需网络即可用）。代码的 stdout 输出和最后 '
             '表达式结果会返回给你。变量在多次调用间保留。'
+            '网络：沙箱无直连网络，HTTP 请求用 await net_fetch(url)（返回 '
+            '(status, text)）或 await net_fetch_bytes(url)（返回 (status, '
+            'bytes)）——经宿主应用网络代理，无 CORS 限制；requests/urllib '
+            '不可用。读网页正文优先用 read_webpage 工具（自动提取更省上下文）。'
             '注意：生成的图表不会自动展示给用户——需要用户看到图片时，'
             '先把图保存为文件（如 plt.savefig("out.png", dpi=110)），'
             '再调用 send_image 工具发送。',
@@ -2223,6 +2227,56 @@ class _HomePageState extends State<HomePage>
         });
       // 先挂树（setState → 隐藏 WebViewWidget 进入 Stack，渲染出原生
       // 视图），再加载页面——未挂树直接 load 会静默不执行
+      // 沙箱网络桥：Python net_fetch(url) → pyNet 通道 → 应用网络栈
+      // 执行（无 CORS）→ __pyNetDone 回填。30s 超时；正文 8MB 上限
+      c.addJavaScriptChannel('pyNet', onMessageReceived: (m) async {
+        Map<String, dynamic> j;
+        try {
+          j = jsonDecode(m.message) as Map<String, dynamic>;
+        } catch (_) {
+          return;
+        }
+        final id = j['id'] as int? ?? -1;
+        final url = (j['url'] as String?)?.trim() ?? '';
+        void done(bool ok, int status, String b64, String text) {
+          final k = _pyKernel;
+          if (k == null) return;
+          try {
+            k.runJavaScript(
+              'window.__pyNetDone($id, $ok, $status, '
+              '${jsonEncode(b64)}, ${jsonEncode(text)})',
+            );
+          } catch (_) {}
+        }
+
+        if (id < 0 || !(url.startsWith('http://') || url.startsWith('https://'))) {
+          done(false, 0, '', '无效的 URL');
+          return;
+        }
+        try {
+          final res = await http
+              .get(Uri.parse(url))
+              .timeout(const Duration(seconds: 30));
+          if (res.bodyBytes.length > 8 << 20) {
+            done(false, res.statusCode, '', '响应过大（>${res.bodyBytes.length ~/ 1024}KB，上限 8MB）');
+            return;
+          }
+          final ct = (res.headers['content-type'] ?? '').toLowerCase();
+          final isText = ct.contains('text/') ||
+              ct.contains('json') ||
+              ct.contains('xml') ||
+              ct.contains('javascript') ||
+              ct.contains('urlencoded');
+          done(
+            res.statusCode >= 200 && res.statusCode < 400,
+            res.statusCode,
+            base64Encode(res.bodyBytes),
+            isText ? utf8.decode(res.bodyBytes, allowMalformed: true) : '',
+          );
+        } catch (e) {
+          done(false, 0, '', '网络错误：$e');
+        }
+      });
       _pyKernel = c;
       if (mounted) setState(() {});
       await WidgetsBinding.instance.endOfFrame;
@@ -2509,7 +2563,8 @@ class _HomePageState extends State<HomePage>
       if (b64.isEmpty) return null;
       final mime = _mimeFromName(p);
       return 'data:$mime;base64,$b64';
-    } catch (_) {
+    } catch (e) {
+      print('TOOLERR fetchImageForView($p): $e');
       return null;
     }
   }
@@ -3103,6 +3158,7 @@ class _HomePageState extends State<HomePage>
           } catch (e) {
             resultText = '工具调用失败：$e';
             resultCode = -1;
+            print('TOOLERR ${call.name}: $e / ${StackTrace.current}');
           }
           if (!mounted) return;
           if (_stopRequested) {

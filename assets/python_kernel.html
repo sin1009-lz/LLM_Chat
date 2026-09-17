@@ -26,6 +26,23 @@
         // 同源 HTTP 服务（127.0.0.1）提供 /pyodide/，相对路径即可
         indexURL: 'pyodide/',
       });
+      // Python 网络助手：沙箱无直连网络，经宿主桥取数
+      try {
+        pyodide.runPython(`
+from js import pyFetch as _py_net_fetch
+
+async def net_fetch(url):
+    """宿主网络请求（沙箱无直连网络）。返回 (status, text)。"""
+    r = await _py_net_fetch(url)
+    return int(r.status), str(r.text)
+
+async def net_fetch_bytes(url):
+    """宿主网络请求。返回 (status, bytes)。"""
+    import base64
+    r = await _py_net_fetch(url)
+    return int(r.status), base64.b64decode(str(r.bodyB64))
+`);
+      } catch (e) { console.warn('net helpers inject failed', e); }
       return pyodide;
     })();
     return pyodideReady;
@@ -40,6 +57,31 @@
       for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
       return btoa(bin);
     } catch (e) { return ''; }
+  };
+
+  // 宿主网络桥：WebView 内 fetch 受 CORS 限制、无法访问任意站点——
+  // 网络请求经 pyNet 通道交给 Dart 用应用网络栈执行（无 CORS），
+  // 结果经 __pyNetDone(id, ok, status, bodyB64, text) 回填 Promise。
+  // Python 侧助手 net_fetch/net_fetch_bytes 在 Pyodide 就绪后注入
+  let pyNetSeq = 0;
+  const pyNetPending = new Map();
+  window.__pyNetDone = function(id, ok, status, bodyB64, text) {
+    const r = pyNetPending.get(id);
+    if (!r) return;
+    pyNetPending.delete(id);
+    r({ ok: !!ok, status: status | 0, bodyB64: bodyB64 || '', text: text || '' });
+  };
+  window.pyFetch = function(url) {
+    const id = ++pyNetSeq;
+    return new Promise((resolve) => {
+      pyNetPending.set(id, resolve);
+      try {
+        pyNet.postMessage(JSON.stringify({ id: id, url: String(url) }));
+      } catch (e) {
+        pyNetPending.delete(id);
+        resolve({ ok: false, status: 0, bodyB64: '', text: String(e) });
+      }
+    });
   };
 
   async function runPython(id, code) {
