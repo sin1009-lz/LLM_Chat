@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -617,12 +618,86 @@ extension _MarkdownViewRender on MarkdownView {
 /// 统一代码块 builder（替换默认 pre 渲染）。
 /// 按语言分发：latex → Math.tex / mermaid → _MermaidDiagram /
 /// html/svg + artifactsEnabled → 代码高亮 + _ArtifactPreview / 其他 → 高亮
-/// 代码块（流式高亮防抖）：流式尾段里的开围栏每帧增长，若每次
-/// build 都全量 hl.highlight.parse（正则密集）+ 全量重排，几百行代码
-/// 就是每帧几十毫秒 = 流式卡顿。策略：
-/// - 内容变化时先渲染纯文本（单 TextSpan，零高亮成本）即时上屏
-/// - 停顿 300ms 无新内容才高亮一次；超 400 行流式中不再自动高亮
-/// - 非流式（稳定前缀/历史消息）构建即高亮，行为不变
+/// ── 跨 isolate 语法高亮 ──
+/// 流式大代码块每帧 hl.highlight.parse（正则密集、O(全文)）在 UI 线程
+/// 执行是卡顿根源——常驻 isolate 解析，UI 线程只做 span 组装与布局。
+/// 请求带版本号，过期响应作废（流式高频变更，只需最新结果）。
+class _HlTree {
+  const _HlTree(this.text, this.cls, this.children);
+  final String? text; // 叶子文本（非叶为 null）
+  final String? cls;
+  final List<_HlTree>? children;
+}
+
+_HlTree _parseTreeSync(String code, String lang) {
+  final r = hl.highlight.parse(
+    code.isEmpty ? ' ' : code,
+    language: lang.isEmpty ? 'plaintext' : lang,
+  );
+  _HlTree conv(hl.Node n) => _HlTree(
+        n.value,
+        n.className,
+        n.children == null ? null : [for (final c in n.children!) conv(c)],
+      );
+  return _HlTree(null, null, [for (final n in r.nodes ?? const []) conv(n)]);
+}
+
+class _HighlightWorker {
+  _HighlightWorker._() {
+    _port = ReceivePort();
+    Isolate.spawn(_entry, _port.sendPort);
+    _sub = _port.listen((msg) {
+      if (msg is SendPort) {
+        _send = msg;
+        _ready.complete();
+        return;
+      }
+      final (id, tree) = msg as (int, _HlTree?);
+      _pending.remove(id)?.complete(tree);
+    });
+  }
+
+  static _HighlightWorker? _i;
+  factory _HighlightWorker.i() => _i ??= _HighlightWorker._();
+
+  late final ReceivePort _port;
+  late final StreamSubscription<dynamic> _sub;
+  SendPort? _send;
+  final _ready = Completer<void>();
+  final _pending = <int, Completer<_HlTree?>>{};
+  int _nextId = 0;
+
+  static void _entry(SendPort main) {
+    final p = ReceivePort();
+    main.send(p.sendPort);
+    p.listen((m) {
+      final (id, code, lang) = m as (int, String, String);
+      try {
+        main.send((id, _parseTreeSync(code, lang)));
+      } catch (_) {
+        main.send((id, null));
+      }
+    });
+  }
+
+  Future<_HlTree?> parse(String code, String lang) async {
+    if (_send == null) {
+      await _ready.future.timeout(const Duration(seconds: 2));
+      if (_send == null) throw StateError('highlight worker 未就绪');
+    }
+    final id = _nextId++;
+    final c = Completer<_HlTree?>();
+    _pending[id] = c;
+    _send!.send((id, code, lang));
+    return c.future;
+  }
+}
+
+/// 代码块（流式高亮不卡的关键）：
+/// - 非流式/小块（≤48 行）：同步高亮，观感与历史版本完全一致
+/// - 流式大块：isolate 后台解析；等待结果期间渲染「旧着色前缀 +
+///   未着色增量」——增量通常在 1-2 帧内被最新着色覆盖，肉眼不可察
+/// - 结果按请求号校验，过期作废
 class _CodeBlock extends StatefulWidget {
   const _CodeBlock({
     required this.code,
@@ -640,40 +715,33 @@ class _CodeBlock extends StatefulWidget {
 
 class _CodeBlockState extends State<_CodeBlock> {
   List<TextSpan>? _spans;
-  Timer? _debounce;
+  String? _coloredFor; // 当前 _spans 对应的 code（增量渲染锚点）
+  int _req = 0; // 在途异步请求号（新请求/切同步路径时自增作废旧响应
 
   @override
   void initState() {
     super.initState();
-    _spans = _parseHighlight();
+    _spans = _treeToSpans(_parseTreeSync(widget.code, widget.lang));
+    _coloredFor = widget.code;
   }
 
-  List<TextSpan> _parseHighlight() {
-    final result = hl.highlight.parse(
-      widget.code.isEmpty ? ' ' : widget.code,
-      language: widget.lang.isEmpty ? 'plaintext' : widget.lang,
-    );
-    return _nodesToSpans(result.nodes ?? const []);
-  }
-
-  static List<TextSpan> _nodesToSpans(List<hl.Node> nodes) {
-    return [
-      for (final n in nodes)
-        TextSpan(
-          text: n.value,
-          children: (n.value == null && n.children != null)
-              ? _nodesToSpans(n.children!)
-              : null,
-          style: (n.className != null && n.className!.isNotEmpty)
-              ? () {
-                  final c = _hlColorStatic(
-                    n.className!.replaceFirst('hljs-', ''),
-                  );
-                  return c == null ? null : TextStyle(color: c);
-                }()
-              : null,
-        ),
-    ];
+  static List<TextSpan> _treeToSpans(_HlTree? root) {
+    List<TextSpan> conv(List<_HlTree> nodes) => [
+          for (final n in nodes)
+            TextSpan(
+              text: n.text,
+              children: n.children == null ? null : conv(n.children!),
+              style: (n.cls != null && n.cls!.isNotEmpty)
+                  ? () {
+                      final c = _hlColorStatic(
+                        n.cls!.replaceFirst('hljs-', ''),
+                      );
+                      return c == null ? null : TextStyle(color: c);
+                    }()
+                  : null,
+            ),
+        ];
+    return root?.children == null ? const <TextSpan>[] : conv(root!.children!);
   }
 
   /// 与 _CodeBlockBuilder._hlColor 同表（保持两处配色一致）
@@ -699,35 +767,54 @@ class _CodeBlockState extends State<_CodeBlock> {
     };
   }
 
-  @override
-  void didUpdateWidget(_CodeBlock old) {
-    super.didUpdateWidget(old);
-    if (old.code == widget.code && old.lang == widget.lang) return;
-    _debounce?.cancel();
-    if (!widget.streaming) {
-      // 非流式（稳定前缀重挂/历史）：立即高亮
-      _spans = _parseHighlight();
-      return;
-    }
-    // 流式中：先退化纯文本（本次 build 即生效），停顿后高亮
-    final lineCount = widget.code.split('\n').length;
-    if (lineCount > 400) return; // 超长流式块：完成前保持纯文本
-    _debounce = Timer(const Duration(milliseconds: 300), () {
-      if (!mounted) return;
-      setState(() => _spans = _parseHighlight());
+  void _syncHighlight() {
+    _req++; // 作废在途异步结果
+    _spans = _treeToSpans(_parseTreeSync(widget.code, widget.lang));
+    _coloredFor = widget.code;
+  }
+
+  void _asyncHighlight() {
+    final code = widget.code;
+    final lang = widget.lang;
+    final id = ++_req;
+    _HighlightWorker.i().parse(code, lang).then((tree) {
+      if (!mounted || id != _req) return;
+      setState(() {
+        _spans = _treeToSpans(tree);
+        _coloredFor = code;
+      });
+    }).catchError((_) {
+      // worker 异常：同步兜底（卡一帧好过丢颜色）
+      if (mounted && id == _req) {
+        setState(() => _syncHighlight());
+      }
     });
   }
 
   @override
-  void dispose() {
-    _debounce?.cancel();
-    super.dispose();
+  void didUpdateWidget(_CodeBlock old) {
+    super.didUpdateWidget(old);
+    if (old.code == widget.code && old.lang == widget.lang) return;
+    final big = widget.code.split('\n').length > 48;
+    if (!widget.streaming || !big) {
+      _syncHighlight();
+      return;
+    }
+    _asyncHighlight();
   }
 
   @override
   Widget build(BuildContext context) {
     final spans = _spans;
-    final text = widget.code.isEmpty ? ' ' : widget.code;
+    final code = widget.code.isEmpty ? ' ' : widget.code;
+    // 增量：已着色前缀之后的新内容（异步结果到达前的 1-2 帧，
+    // append-only 校验失败则整块退纯文本）
+    String? delta;
+    if (spans != null &&
+        _coloredFor != null &&
+        widget.code.startsWith(_coloredFor!)) {
+      delta = widget.code.substring(_coloredFor!.length);
+    }
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -744,8 +831,9 @@ class _CodeBlockState extends State<_CodeBlock> {
             height: 1.5,
             color: Color(0xFFD4D4D4),
           ),
-          // 纯文本路径：单 span 承载全文（高亮挂起/防抖窗口中）
-          children: spans ?? [TextSpan(text: text)],
+          children: spans == null
+              ? [TextSpan(text: code)]
+              : [...spans, if (delta != null && delta.isNotEmpty) TextSpan(text: delta)],
         ),
       ),
     );
