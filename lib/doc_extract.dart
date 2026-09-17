@@ -5,7 +5,7 @@ import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart' show compute;
 
 /// ──────────────────────────────────────────────────────────────
-/// 文档附件本地解析（Cherry Studio / ChatBox 同方案）
+/// 文档附件本地解析（解包 + 结构化提取，无需服务端）
 ///
 /// OpenAI 兼容端点没有文件上传 API，文档内容必须以文本注入消息。
 /// Office Open XML（docx/xlsx/pptx）本质是 ZIP + XML，本地解包提取

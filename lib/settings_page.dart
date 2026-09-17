@@ -149,7 +149,7 @@ Widget _switchTile(
 }) {
   final dark = Theme.of(context).brightness == Brightness.dark;
   // 药丸型开关（灰白体系，深色模式适配）：浅灰/深灰底 + 细外框 +
-  // 深灰/浅灰圆；开启/关闭同款（显式 trackOutlineColor 覆盖 M3
+  // 深灰/浅灰圆；开启/关闭样式一致（显式 trackOutlineColor 覆盖 M3
   // 开启态透明描边），状态由圆钮位置区分
   final thumb = dark ? Colors.grey.shade300 : Colors.grey.shade800;
   final track = dark ? Colors.grey.shade700 : Colors.grey.shade300;
@@ -3081,7 +3081,7 @@ class _McpServerListPageState extends State<_McpServerListPage> {
                 Switch(
                   value: s.enabled,
                   // 药丸型开关：深色模式适配的浅灰/深灰底 + 细外框 + 圆钮，
-                  // 开启/关闭同款（显式 outline 覆盖 M3 开启态透明描边）
+                  // 开启/关闭样式一致（显式 outline 覆盖 M3 开启态透明描边）
                   activeThumbColor: dark
                       ? Colors.grey.shade300
                       : Colors.grey.shade800,
@@ -3363,7 +3363,7 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                     _update((s) => s.copyWith(pasteLongTextAsFile: v)),
               ),
               const SizedBox(height: 12),
-              // 阈值输入（与文字替换页内联编辑同款卡片包裹）
+              // 阈值输入（与文字替换页内联编辑一致的卡片包裹）
               Material(
                 color: _buttonColor(context),
                 borderRadius: BorderRadius.circular(14),

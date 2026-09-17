@@ -50,7 +50,7 @@ class MarkdownView extends StatefulWidget {
 
   /// 朗读高亮：当前朗读到第几个块（splitMarkdownBlocks 的块号，
   /// -1 = 无朗读/本气泡不在朗读）。朗读管道按同一切分函数分块，
-  /// 段→块号由播放队列映射（Kimi RawText 同思路：语音段回指原文）
+  /// 段→块号由播放队列映射（语音段回指原文文本）
   final int speakBlockIndex;
 
   /// 句级高亮：当前块内读到第几句（splitProseSentences 的句号，
@@ -268,7 +268,7 @@ class _MarkdownViewState extends State<MarkdownView> {
   int _lastRenderMs = 0;
 
   /// 朗读块渲染缓存：整条消息按块缓存 MarkdownBody——朗读段切换时
-  /// 只换高亮装饰，不重解析 markdown（复用稳定前缀同款思路）
+  /// 只换高亮装饰，不重解析 markdown（与稳定前缀缓存策略一致）
   String? _spSource;
   Brightness? _spBrightness;
   List<Widget>? _spBodies;
@@ -578,8 +578,8 @@ extension _MarkdownViewRender on MarkdownView {
   /// 正则非贪婪、不跨行（inline），避免误吞普通 $ 符号
   String _preprocessLatex(String input) => preprocessLatex(input);
 
-  /// 打开链接（仅 http/https）：应用内浏览器打开（Via 思路：复用
-  /// 系统 WebView，零额外体积），不再跳出应用
+  /// 打开链接（仅 http/https）：应用内浏览器打开（复用系统
+  /// WebView 内核，不引入独立浏览器引擎），不再跳出应用
   Future<void> _openLink(BuildContext context, String? href) async {
     if (href == null || href.isEmpty) return;
     final uri = Uri.tryParse(href);
@@ -807,7 +807,7 @@ class _CodeBlockState extends State<_CodeBlock> {
 
   /// 流式开围栏的显示窗：SelectableText 对全文做布局是 O(全长)，
   /// 几百行每帧重排 = 卡顿残余的根源。超窗块只渲染尾部 60 行
-  ///（Kimi/ChatGPT 同款：块内文字上滚、完成后展开全文）
+  ///（流式渲染通行策略：块内内容滚动呈现，完成后展开全文）
   (String, int) _windowed(String code) {
     if (!widget.streaming) return (code, 0);
     final lines = code.split('\n');

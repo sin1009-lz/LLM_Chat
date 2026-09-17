@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-/// 应用内浏览器（Via 思路：复用系统 WebView 内核，零额外体积）。
+/// 应用内浏览器（复用系统 WebView 内核，不引入独立浏览器引擎）。
 /// markdown 链接等网页打开统一走这里，不再跳出应用；
 /// 也可传 [htmlDoc]（HTML 字符串）直接预览（artifacts 等）。
 /// - 地址栏：点击进入编辑，回车跳转（自动补 https://）

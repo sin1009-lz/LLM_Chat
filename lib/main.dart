@@ -556,7 +556,7 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  /// 朗读分段（Kimi 架构：客户端零裁剪，间距由合成端产出）：
+  /// 朗读分段（客户端零音频处理，段间距由合成端韵律决定）：
   /// 显示文本 → LaTeX 预处理（与渲染一致）→ 按空行切块 → **每块一次
   /// 合成请求**——句间距在单次合成内部由韵律引擎产生，天然统一；
   /// 请求边界只落在段落处（天然停顿，头部静音差异不可闻）。
@@ -630,7 +630,7 @@ class _HomePageState extends State<HomePage>
     return starts;
   }
 
-  /// 播放队列（Kimi/ExoPlayer 同款）：单播放器 + ConcatenatingAudioSource
+  /// 播放队列（流式音频标准结构）：单播放器 + ConcatenatingAudioSource
   /// 动态追加——合成一段挂一段，播放器在当前段结束前自动预缓冲下一段
   ///（框架级 gapless，替代手搓双播放器/信号竞速，重音与卡顿同源消除）。
   /// 会话号防旧管道；synth 抛错 → 停播 + 提示
@@ -693,7 +693,7 @@ class _HomePageState extends State<HomePage>
       _speakingSent = -1;
       setState(() => _speakingSeg = (m, idx, segBlocks));
     });
-    // 句级定位（Kimi RawText 同思路）：播放位置 → WordBoundary 当前词
+    // 句级定位：播放位置 → WordBoundary 当前词
     // → 词流对齐回显示句子 → 当前句加灰底。positionStream 高频触发，
     // 仅句号变化才 setState
     final diagDone = <int>{};
@@ -807,7 +807,7 @@ class _HomePageState extends State<HomePage>
   // 部分国产 ROM 上不给第三方绑定，这是主朗读方案）──
   AudioPlayer? _audioPlayer;
 
-  /// 双播放器交替（Kimi 式无间隙流水线）：A 播当前段时 B 预装
+  /// 语音 API 朗读：分段请求 + 统一播放队列
   /// 下段（setAudioSource 完成即完成解码缓冲），A 播完立即 play
   /// B——消除每段 MP3 解码起播的卡顿
 
@@ -861,7 +861,7 @@ class _HomePageState extends State<HomePage>
   }
 
 
-  /// TTS 预处理：Markdown → 可朗读文本（Pipecat MarkdownTextFilter 同思路）。
+  /// TTS 预处理：Markdown → 可朗读文本（通用语音助手清洗规则）。
   /// 块级：围栏代码块 →「代码」占位；表格 → 按行拍平横向读（跳过分隔行）。
   /// 行内：图片删、链接留文字、强调/标题/引用标记删、行内代码留内容、
   /// LaTeX →「公式」、裸 URL 删、emoji 剥、空白压缩
@@ -1165,7 +1165,7 @@ class _HomePageState extends State<HomePage>
 
   /// 滚动通知：跟踪用户手指拖动（当前无抢滚动逻辑，保留供调试）
 
-  /// 上滑快捷导航（ChatBox 式）。两类触发：
+  /// 上滑快捷导航（竖排悬浮）。两类触发：
   /// · 回到底部：离开底部 >320px 持续显示，贴回隐藏（滞回）
   /// · 回到顶部/上一条消息：仅【快速上滑】（>1.2px/ms 向上）时浮现，
   ///   2.2s 静止自动隐去
@@ -1329,7 +1329,7 @@ class _HomePageState extends State<HomePage>
   /// 自动归档/清理周期定时器（每 6 小时）
   Timer? _maintainTimer;
 
-  /// AI 标题生成（llama.cpp 风格）：新会话首轮回复完成后触发。
+  /// AI 标题生成：新会话首轮回复完成后触发。
   /// 记录目标会话 id 与首条用户消息（仅一次，完成后清空）
   String? _titleGenConvId;
   String? _titleGenUser;
@@ -1363,7 +1363,7 @@ class _HomePageState extends State<HomePage>
   /// 发送消息：追加用户消息 + 流式接收助手回复
   Future<void> _onSend(String text, List<String> attachmentNames) async {
     // 附件处理：图片 → 多模态 ImagePart（base64 原图真实上传）；
-    // 文本文件（txt 等）→ 读取全文存入文件部件（llama.cpp 风格
+    // 文本文件（txt 等）→ 读取全文存入文件部件（与桌面端通行做法一致
     // File: 名称/Content，模型可阅读）；其他文件 → 名字拼进文本
     final imageParts = <ImagePart>[];
     final fileParts = <MessageFilePart>[];
@@ -1404,7 +1404,7 @@ class _HomePageState extends State<HomePage>
           continue;
         }
         // Office 文档（docx/xlsx/pptx）：本地解包提取文本（compute
-        // 隔离，Cherry Studio/ChatBox 同方案——OpenAI 兼容端点没有
+        // 隔离解析——OpenAI 兼容端点没有
         // 文件上传 API，只能文本注入）；解析失败 → 文件名占位
         if (isDocAttachmentName(att.name)) {
           try {
@@ -2417,7 +2417,7 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  /// 本地网页阅读器：隐藏 WebView（Python 内核同款宿主方式）。
+  /// 本地网页阅读器：隐藏 WebView（复用 Python 内核的宿主方式）。
   /// 渲染 JS 页面后取 innerText（可见文本，质量优于对原始 HTML 的
   /// 正则提取）；完全本地，不把网址发给第三方
   WebViewController? _webReader;
@@ -2577,7 +2577,7 @@ class _HomePageState extends State<HomePage>
   static const int _kMaxWebChars = 20000;
 
   /// 读网页（builtin__read_webpage）：Jina Reader 优先（服务端渲染 +
-  /// 正文提取，返回干净的 Markdown——Cherry Studio 等客户端的默认方案），
+  /// 正文提取，返回干净的 Markdown——客户端侧通行做法），
   /// 失败回退本地抓取 + HTML 正文提取（compute 隔离，隐私不外发）。
   /// 返回给模型的文本；失败以 [读取失败 开头（调度侧据此判败）
   /// 读网页：返回 (给模型的文本, 网页图片 URL 列表)。
@@ -2675,7 +2675,7 @@ class _HomePageState extends State<HomePage>
     final q = query.trim();
     if (q.isEmpty) return '搜索失败：查询词为空';
     // 搜索绑死 DeepSeek 服务商：key 固定取 DeepSeek 提供方（预置不可删），
-    // 与当前聊天模型所属提供方解耦——Kimi/Qwen/GLM 聊天时搜索照样可用
+    // 与当前聊天模型所属提供方解耦——切换任何提供方搜索均可用
     ModelProvider? dsProvider;
     for (final p in _providers) {
       if (p.name == 'DeepSeek') {
@@ -2906,7 +2906,7 @@ class _HomePageState extends State<HomePage>
         }
         // 每轮都带工具：模型可随时再搜索/查询。之前最后一轮不带工具
         // （强制回答防死循环），但模型在无工具时可能凭惯性输出 XML
-        // 工具调用文本（llama.cpp 风格 <tool_calls>）而非回答——
+        // 工具调用文本（部分推理服务的 <tool_calls> 约定）而非回答——
         // 轮数上限 +1 留给最终回答，XML 调用见下方识别兜底
         final acc = StringBuffer();
         final pendingCalls = <int, ({String id, String name, String args})>{};
@@ -2964,7 +2964,7 @@ class _HomePageState extends State<HomePage>
           }
         }
         // 无 JSON 工具调用 → 检查模型是否以 XML 文本形式输出了工具调用
-        //（llama.cpp 风格 <tool_calls><invoke name="...">）；识别后
+        //（<tool_calls><invoke name="..."> 文本约定）；识别后
         // 当作真实工具调用执行，避免把调用语法原文当成最终回答
         if (pendingCalls.isEmpty) {
           final xmlCalls = _parseXmlToolCalls(acc.toString());
@@ -3272,7 +3272,7 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  /// 解析模型以 XML 文本形式输出的工具调用（llama.cpp 风格，
+  /// 解析模型以 XML 文本形式输出的工具调用（非标准 JSON 通道的
   /// 如 `<tool_calls><invoke name="tool"><parameter name="a">v</parameter></invoke></tool_calls>`）。
   /// 返回 (工具名, JSON 参数串) 列表；文本不是工具调用格式时返回空
   List<({String name, String args})> _parseXmlToolCalls(String text) {
@@ -4364,7 +4364,7 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  /// AI 生成会话标题（llama.cpp 风格）：独立短请求 + 清洗规则，过短回退首行
+  /// AI 生成会话标题：独立短请求 + 清洗规则，过短回退首行
   Future<void> _generateAiTitle(
     Conversation conv,
     String userContent,
@@ -5649,7 +5649,7 @@ class _HomePageState extends State<HomePage>
     // 键盘/输入栏变化反映在列表 padding → 布局 →
     // ChatScrollPosition.correctForNewDimensions 统一处理（贴底/上翻补偿）
 
-    // 滚动列表：死区 + 系统提示词卡片（仅在有提示词或编辑态显示，llama.cpp 同款）+ 消息
+    // 滚动列表：死区 + 系统提示词卡片（仅在有提示词或编辑态显示）+ 消息
     final messages = _currentConversation?.messages ?? const <Message>[];
     final showSystem = (_prompt?.isNotEmpty ?? false) || _editingSystem;
     // 底部留白 = 输入栏顶边（实时高度）+ 键盘高度 + 手势条：
@@ -5866,7 +5866,7 @@ class _HomePageState extends State<HomePage>
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
           ),
         ),
-        // ── 上滑快捷导航（ChatBox 式，竖排；通用设置可关）──
+        // ── 上滑快捷导航（竖排悬浮；通用设置可关）──
         // 回到底部：离开底部持续显示；回到顶部/上一条：快速上滑
         // 才浮现（2.2s 隐去）。底部实时跟随输入栏真实高度
         //（_inputBarAnimatedTop = SizeReporter 逐帧上报，防干涉）
@@ -6184,7 +6184,7 @@ class _HomePageState extends State<HomePage>
 
   /// 抽屉收敛（所有手势结束路径统一走这里）：动画到就近端点，
   /// 并留一道帧后自检——若动画意外中断仍未到端点，再次收敛
-  /// 抽屉弹簧开合（Kimi/iOS 手感）：从当前位置出发，携带手指速度
+  /// 抽屉弹簧开合（自然减速 + 轻微回弹）：从当前位置出发，携带手指速度
   /// （px/s → 控制器值/s），轻微回弹自然收敛——替代从静止起跑的
   /// easeOutQuart（速度断裂 = 手感奇怪的主因）
   void _springDrawerTo(double target, {double velocityPxPerSec = 0}) {
@@ -6193,7 +6193,7 @@ class _HomePageState extends State<HomePage>
         SpringDescription.withDampingRatio(
           mass: 1,
           stiffness: 420,
-          ratio: 0.88, // <1 轻微回弹（Kimi/iOS 手感）
+          ratio: 0.88, // <1 轻微回弹（拟真弹簧阻尼）
         ),
         _drawerController.value.clamp(0.0, 1.0),
         target,
@@ -6450,7 +6450,7 @@ class _HomePageState extends State<HomePage>
     await _persist(conv);
   }
 
-  /// 消息气泡（llama.cpp 风格：user 靠右、assistant 靠左，思考与回复分割）
+  /// 消息气泡：user 靠右、assistant 靠左，思考与回复分割
   /// _MessageItem 等子组件的公开入口（见 HomePageStateScope）
   Widget buildMessageBubble(BuildContext context, Message m, int index) =>
       _messageBubble(context, m, index);
@@ -6563,7 +6563,7 @@ class _HomePageState extends State<HomePage>
                         ? CrossAxisAlignment.end
                         : CrossAxisAlignment.start,
                     children: [
-                      // 文件块（llama.cpp 风格）：文本附件以文件卡片显示。
+                      // 文件块：文本附件以文件卡片显示。
                       // 删除入口在编辑模式（编辑时可增删文件），平时不显示删除键
                       if (m.fileParts != null && m.fileParts!.isNotEmpty)
                         ...m.fileParts!.map(
@@ -7289,9 +7289,9 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  /// 文件块（llama.cpp 风格）：圆角卡片，左文件图标 + 右文件名/大小两行。
+  /// 文件块：圆角卡片，左文件图标 + 右文件名/大小两行。
   /// 文本附件的展示形态（内容随消息发送，模型可阅读）
-  /// 文件块（llama.cpp 风格）：圆角卡片，左文件图标 + 右文件名/大小两行。
+  /// 文件块：圆角卡片，左文件图标 + 右文件名/大小两行。
   /// 删除入口在编辑模式（见 _inlineMessageEditor 文件管理区）
   Widget _fileBlock(BuildContext context, MessageFilePart f) {
     final scheme = Theme.of(context).colorScheme;
@@ -8148,7 +8148,7 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  /// 思考过程折叠块（llama.cpp 风格：灰色小字 + 展开/收起）。
+  /// 思考过程折叠块：灰色小字 + 展开/收起。
   /// 展开时思考区增高：上翻补偿/贴底保持由 ChatScrollPosition 在
   /// 布局阶段统一处理（correctForNewDimensions），无需额外干预。
   /// [streaming] 流式接收中：尾部窗口 + Text（见 _ThinkingBlock 注释）
@@ -8937,7 +8937,7 @@ class _AttachmentBar extends StatelessWidget {
         itemBuilder: (context, index) {
           final att = attachments[index];
           return SizedBox(
-            // 文件附件：llama.cpp 风格横排卡片（图标 + 文件名 + 大小）
+            // 文件附件：横排卡片（图标 + 文件名 + 大小）
             width: att.isImage ? 68 : 150,
             height: 68,
             child: Stack(
@@ -9054,7 +9054,7 @@ class _AttachmentBar extends StatelessWidget {
     );
   }
 
-  /// 文件卡片（llama.cpp 风格横排）：文件图标 + 文件名 + 大小两行
+  /// 文件卡片（横排）：文件图标 + 文件名 + 大小两行
   Widget _fileIcon(BuildContext context, _Attachment att) {
     final isText = isTextAttachmentName(att.name);
     final lower = att.name.toLowerCase();
@@ -9472,7 +9472,7 @@ class _GlassInputBarState extends State<_GlassInputBar> {
                 child: widget.isResponding
                     ? _roundButton(
                         Icons.stop, // 响应中：停止
-                        // 与发送键同款灰玻璃风格（仅图标不同）
+                        // 与发送键一致的灰玻璃风格（仅图标不同）
                         backgroundColor: Colors.grey.withValues(alpha: 0.5),
                         iconColor: Theme.of(context).colorScheme.onSurface,
                         onPressed: widget.onStop,
@@ -10057,7 +10057,7 @@ class _TypingDotsPainter extends CustomPainter {
       old.t != t || old.color != color;
 }
 
-/// 思考过程折叠块（llama.cpp 风格：灰色小字 + 展开/收起箭头）
+/// 思考过程折叠块：灰色小字 + 展开/收起箭头
 class _ThinkingBlock extends StatefulWidget {
   const _ThinkingBlock({
     required this.thinking,
@@ -11949,7 +11949,7 @@ Future<Uint8List> compressSingleImageNative(
       final longest = math.max(srcW, srcH).toDouble();
       final shortest = math.min(srcW, srcH).toDouble();
       // 默认缩放：长边 ≤ maxSide 且 总像素 ≤ maxMegapixels（llama.cpp
-      // 同款像素预算——端点进模型前也会缩到 ~1.69MP，超发无益）
+      // 相同像素预算——端点进模型前也会缩到 ~1.69MP，超发无益）
       var scale = math.min(
         math.min(1.0, maxSide / longest),
         math.sqrt(maxMegapixels * 1e6 / (srcW * srcH)),

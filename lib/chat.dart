@@ -588,7 +588,7 @@ class Message {
   /// 分支总数（当前 + 历史分支）
   int get branchCount => (branches?.length ?? 0);
 
-  /// 发往模型的完整文本：文件部件按 llama.cpp 风格格式化
+  /// 发往模型的完整文本：文件部件按固定模板格式化为引用
   /// （File: 名称\nContent: 内容）后拼接正文
   String get modelContent {
     final f = fileParts;
@@ -1519,7 +1519,7 @@ class LlmService {
         '\n\n$body';
   }
 
-  /// 生成会话标题（llama.cpp 风格）：独立短请求，返回模型原始输出
+  /// 生成会话标题：独立短请求，返回模型原始输出
   /// （清洗与回退逻辑在调用方）。失败返回空串。
   /// [customPrompt] 非空时优先使用（含 {{USER}}/{{ASSISTANT}} 占位符，
   /// 由用户在通用设置里配置）；否则用内置默认提示词。

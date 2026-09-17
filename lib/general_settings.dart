@@ -114,7 +114,7 @@ class GeneralSettings {
   /// 发送图片压缩开关（关 = 原图直传，受 4MB/8192px 安全校验）
   final bool imageCompressEnabled;
 
-  /// 图片压缩目标百万像素（llama.cpp 同款；默认 1.69MP ≈ 端点
+  /// 图片压缩目标百万像素（默认 1.69MP ≈ 端点
   /// 进模型前的有效分辨率）
   final double imageMaxMegapixels;
 
