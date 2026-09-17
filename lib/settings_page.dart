@@ -3681,11 +3681,11 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
                     context: context,
                     controller: _reactRoundsCtrl,
                     label: '工具循环上限（轮）',
-                    hint: '默认 6，范围 2-20',
+                    hint: '默认 6，范围 2-20，0 = 无上限',
                     keyboardType: TextInputType.number,
                     onChanged: (v) {
                       final n = int.tryParse(v);
-                      if (n != null && n >= 2 && n <= 20) {
+                      if (n != null && (n == 0 || (n >= 2 && n <= 20))) {
                         _update((s) => s.copyWith(reactMaxRounds: n));
                       }
                     },

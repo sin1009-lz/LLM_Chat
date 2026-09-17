@@ -33,6 +33,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'chat.dart';
 import 'edge_tts.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'doc_extract.dart';
 import 'general_settings.dart';
 import 'ui_tokens.dart';
@@ -2836,7 +2837,9 @@ class _HomePageState extends State<HomePage>
   }) async {
     // 轮数上限（可配置）：工具可随时调用，多留一轮给最终回答；
     // 模型在上限内仍可正常回答，极端情况下全调工具也不会无限循环
-    final maxRounds = _general.reactMaxRounds.clamp(2, 20);
+    // 0 = 无上限（信任用户自行控制）；否则钳制 2-20
+    final rawRounds = _general.reactMaxRounds;
+    final maxRounds = rawRounds == 0 ? 1 << 30 : rawRounds.clamp(2, 20);
     // 循环独立气泡：每轮一个 assistant 气泡，工具调用作为轮次分割。
     // 第一轮复用 _generate 创建的占位气泡，之后每轮结束创建新气泡
     var current = assistantMsg..toolCalls = [];
@@ -3225,9 +3228,10 @@ class _HomePageState extends State<HomePage>
           conv.messages.add(
             Message(
               role: Role.assistant,
-              content:
-                  '⚠️ 工具调用已达上限（$maxRounds 轮），模型未完成回答，'
-                  '输出已截断。可调高「通用设置 → 工具循环上限」后重试。',
+              content: rawRounds == 0
+                  ? '⚠️ 工具调用轮数异常过多，已中止。'
+                  : '⚠️ 工具调用已达上限（$rawRounds 轮），模型未完成回答，'
+                    '输出已截断。可在「通用设置 → 工具循环上限」调高或设 0（无上限）后重试。',
               ts: DateTime.now(),
               error: true,
             ),
@@ -7378,12 +7382,57 @@ class _HomePageState extends State<HomePage>
 
   /// 单张图片缩略图（缓存 provider 复用 + ResizeImage 限宽解码，
   /// 避免重复加载闪烁与解码内存开销）
+  /// SVG 图片判定：Flutter Image 解不了 SVG（显示空白/裂图），
+  /// 走 flutter_svg 渲染路径
+  static bool _isSvgImage(ImagePart img) =>
+      img.mimeType.contains('svg') ||
+      img.name.toLowerCase().endsWith('.svg') ||
+      img.dataUrl.startsWith('data:image/svg');
+
+
+  /// SVG 字节缓存（缩略图路径，镜像 _thumbFutures 语义）
+  static final Map<String, Future<Uint8List>> _svgBytesFutures = {};
+
   Widget _cachedImageThumb(BuildContext context, ImagePart img) {
     return GestureDetector(
       onTap: () => _showImageFullscreen(context, img),
+      // 长按保存到系统媒体库
+      onLongPress: () => saveImageToGallery(context, img.dataUrl),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        // 文件 provider：FileImage 解码在 Flutter 异步线程池（UI 线程
+        // SVG：flutter_svg 渲染（Flutter Image 解不了 SVG）
+        child: _isSvgImage(img)
+            ? FutureBuilder<Uint8List>(
+                future: _svgBytesFutures.putIfAbsent(
+                  img.displayUrl,
+                  () => compute(
+                    (u) {
+                      final c = u.indexOf(',');
+                      return base64Decode(c >= 0 ? u.substring(c + 1) : u);
+                    },
+                    img.displayUrl,
+                  ),
+                ),
+                builder: (context, snap) => snap.data == null
+                    ? Container(color: Colors.black12)
+                    : SvgPicture.memory(
+                        snap.data!,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => const Icon(
+                          Icons.broken_image_outlined,
+                          color: Colors.white54,
+                        ),
+                      ),
+              )
+            : _rasterThumb(img),
+      ),
+    );
+  }
+
+  Widget _rasterThumb(ImagePart img) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      // 文件 provider：FileImage 解码在 Flutter 异步线程池（UI 线程
         // 零阻塞），磁盘缓存命中后接近零成本——彻底替代 UI 线程同步
         // base64Decode 的 MemoryImage 路径
         child: FutureBuilder<FileImage>(
@@ -7439,8 +7488,7 @@ class _HomePageState extends State<HomePage>
                   ),
                 ),
         ),
-      ),
-    );
+      );
   }
 
   /// 全屏查看图片：黑色背景 + 双指/双击缩放 + 点击关闭，左右滑动
@@ -7493,6 +7541,12 @@ class _HomePageState extends State<HomePage>
 
   /// 打开全屏图片画廊：收集当前会话全部图片（消息顺序），左右滑动
   /// 浏览；[dataUrl] 定位初始页
+  /// SVG dataUrl → 原始字节（SVG 是小体量文本，同步解码可接受）
+  static Uint8List _svgBytesSync(String dataUrl) {
+    final c = dataUrl.indexOf(',');
+    return base64Decode(c >= 0 ? dataUrl.substring(c + 1) : dataUrl);
+  }
+
   void _openImageGallery(String dataUrl) {
     final urls = <String>[];
     for (final m in _currentConversation?.messages ?? const <Message>[]) {
@@ -7505,7 +7559,12 @@ class _HomePageState extends State<HomePage>
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => _ImageFullscreen(
-          images: urls.map(_imageProviderFor).toList(),
+          images: [
+            for (final u in urls)
+              u.startsWith('data:image/svg')
+                  ? _FullImg(svg: _svgBytesSync(u), dataUrl: u)
+                  : _FullImg(provider: _imageProviderFor(u), dataUrl: u),
+          ],
           initialIndex: idx < 0 ? 0 : idx,
         ),
       ),
@@ -8004,10 +8063,11 @@ class _HomePageState extends State<HomePage>
                   // 点击产图 → 全屏查看（复用聊天图片缓存 provider）
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(
-                      builder: (_) =>
-                          _ImageFullscreen(
-                            images: [_imageProviderFor(imgs[i])],
-                          ),
+                      builder: (_) => _ImageFullscreen(
+                        images: imgs[i].startsWith('data:image/svg')
+                            ? [_FullImg(svg: _svgBytesSync(imgs[i]), dataUrl: imgs[i])]
+                            : [_FullImg(provider: _imageProviderFor(imgs[i]), dataUrl: imgs[i])],
+                      ),
                     ),
                   ),
                   child: ClipRRect(
@@ -10981,12 +11041,50 @@ class _GlassIconButtonState extends State<GlassIconButton>
 /// 双击缩放（带动画、以点击位置为中心，微信/系统相册风格）+
 /// 放大后自由平移（不被图片边界锁死）+ 点按/右上角按钮关闭。
 /// 相比手写 InteractiveViewer：缩放动画顺滑、不瞬跳、不卡边界
+/// 长按保存图片到系统媒体库（位图→相册 Pictures/LLM_Chat，
+/// SVG→下载 Download/LLM_Chat）。解码在 isolate、写库走平台通道
+Future<void> saveImageToGallery(BuildContext context, String dataUrl) async {
+  void toast(String s) =>
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text(s)),
+      );
+  try {
+    final comma = dataUrl.indexOf(',');
+    final head = dataUrl.substring(0, comma.clamp(0, dataUrl.length));
+    final m = RegExp(r'data:([^;,]+)').firstMatch(head);
+    final mime = m?.group(1) ?? 'image/png';
+    final b64 = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
+    final bytes = await compute((b) => base64Decode(b), b64);
+    await const MethodChannel('llm/media').invokeMethod<String>(
+      'saveImage',
+      {
+        'bytes': bytes,
+        'mime': mime,
+        'name': 'llmui_${DateTime.now().millisecondsSinceEpoch}',
+      },
+    );
+    HapticFeedback.mediumImpact();
+    toast(mime.contains('svg') ? '已保存到 下载/LLM_Chat' : '已保存到 相册/LLM_Chat');
+  } catch (e) {
+    toast('保存失败：$e');
+  }
+}
+
+/// 全屏查看的图片条目：位图走 provider，SVG 走 flutter_svg 字节
+///（Flutter Image 解不了 SVG）；dataUrl 保留供长按保存
+class _FullImg {
+  _FullImg({this.provider, this.svg, required this.dataUrl});
+  final ImageProvider? provider;
+  final Uint8List? svg;
+  final String dataUrl;
+}
+
 class _ImageFullscreen extends StatefulWidget {
   const _ImageFullscreen({required this.images, this.initialIndex = 0});
 
   /// 当前聊天的全部图片（复用缓存 provider，原图全分辨率）；
   /// 多张可左右滑动浏览
-  final List<ImageProvider> images;
+  final List<_FullImg> images;
   final int initialIndex;
 
   @override
@@ -11012,28 +11110,47 @@ class _ImageFullscreenState extends State<_ImageFullscreen> {
       body: Stack(
         children: [
           Positioned.fill(
-            child: PhotoViewGallery.builder(
-              pageController: _page,
-              itemCount: widget.images.length,
-              onPageChanged: (i) => setState(() => _index = i),
-              builder: (context, i) => PhotoViewGalleryPageOptions(
-                imageProvider: widget.images[i],
-                // 初始 contain（整图可见，无黑边）；放大上限 8 倍
-                initialScale: PhotoViewComputedScale.contained,
-                minScale: PhotoViewComputedScale.contained,
-                maxScale: 8.0,
-                filterQuality: FilterQuality.medium,
-                // 点按关闭（双击缩放由 PhotoView 内置处理，不影响单击）
-                onTapUp: (_, _, _) => Navigator.of(context).pop(),
-                errorBuilder: (context, error, stackTrace) => const Center(
-                  child: Icon(
-                    Icons.broken_image_outlined,
-                    size: 64,
-                    color: Colors.white54,
-                  ),
-                ),
+            // 长按保存当前图（静止长按与 PhotoView 捏合/拖动不冲突）
+            child: GestureDetector(
+              behavior: HitTestBehavior.deferToChild,
+              onLongPressStart: (_) =>
+                  saveImageToGallery(context, widget.images[_index].dataUrl),
+              child: PhotoViewGallery.builder(
+                pageController: _page,
+                itemCount: widget.images.length,
+                onPageChanged: (i) => setState(() => _index = i),
+                builder: (context, i) {
+                  final e = widget.images[i];
+                  if (e.svg != null) {
+                    return PhotoViewGalleryPageOptions.customChild(
+                      child: SvgPicture.memory(e.svg!),
+                      initialScale: PhotoViewComputedScale.contained,
+                      minScale: PhotoViewComputedScale.contained,
+                      maxScale: 8.0,
+                      onTapUp: (_, _, _) => Navigator.of(context).pop(),
+                    );
+                  }
+                  return PhotoViewGalleryPageOptions(
+                    imageProvider: e.provider!,
+                    // 初始 contain（整图可见，无黑边）；放大上限 8 倍
+                    initialScale: PhotoViewComputedScale.contained,
+                    minScale: PhotoViewComputedScale.contained,
+                    maxScale: 8.0,
+                    filterQuality: FilterQuality.medium,
+                    // 点按关闭（双击缩放由 PhotoView 内置处理，不影响单击）
+                    onTapUp: (_, _, _) => Navigator.of(context).pop(),
+                    errorBuilder: (context, error, stackTrace) => const Center(
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        size: 64,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  );
+                },
+                backgroundDecoration:
+                    const BoxDecoration(color: Colors.black),
               ),
-              backgroundDecoration: const BoxDecoration(color: Colors.black),
             ),
           ),
           // 页码指示（多张时）

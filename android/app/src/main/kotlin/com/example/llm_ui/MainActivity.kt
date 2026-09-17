@@ -49,6 +49,67 @@ class MainActivity : FlutterActivity() {
                     result.notImplemented()
                 }
             }
+        // 图片保存到系统媒体库（长按保存）：位图入 Pictures/LLM_Chat，
+        // SVG 入 Downloads/LLM_Chat（MediaStore.Images 不收 svg mime）。
+        // API 29+ 走 MediaStore 免权限；更早版本回退公共目录尽力而为
+        MethodChannel(engine.dartExecutor.binaryMessenger, "llm/media")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "saveImage") {
+                    val bytes = call.argument<ByteArray>("bytes")
+                    val mime = call.argument<String>("mime") ?: "image/png"
+                    val name = call.argument<String>("name") ?: "img_${System.currentTimeMillis()}"
+                    if (bytes == null || bytes.isEmpty()) {
+                        result.error("empty", "no bytes", null)
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        result.success(saveToMediaStore(bytes, mime, name))
+                    } catch (e: Exception) {
+                        result.error("save", e.message, null)
+                    }
+                } else {
+                    result.notImplemented()
+                }
+            }
+    }
+
+    /** 保存到系统媒体库，返回展示路径 */
+    private fun saveToMediaStore(bytes: ByteArray, mime: String, name: String): String {
+        val ext = when {
+            mime.contains("jpeg") -> "jpg"
+            mime.contains("svg") -> "svg"
+            mime.contains("webp") -> "webp"
+            mime.contains("gif") -> "gif"
+            mime.contains("png") -> "png"
+            else -> "png"
+        }
+        val fileName = if (name.contains('.')) name else "$name.$ext"
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime)
+        }
+        val uri = if (android.os.Build.VERSION.SDK_INT >= 29) {
+            if (mime.contains("svg")) {
+                values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/LLM_Chat")
+                contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            } else {
+                values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/LLM_Chat")
+                contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = java.io.File(
+                android.os.Environment.getExternalStoragePublicDirectory(
+                    if (mime.contains("svg")) android.os.Environment.DIRECTORY_DOWNLOADS
+                    else android.os.Environment.DIRECTORY_PICTURES
+                ), "LLM_Chat"
+            )
+            dir.mkdirs()
+            java.io.File(dir, fileName).writeBytes(bytes)
+            return dir.path + "/" + fileName
+        } ?: throw IllegalStateException("MediaStore 插入失败")
+        contentResolver.openOutputStream(uri)!!.use { it.write(bytes) }
+        return uri.toString()
     }
 
     /** OkHttp WebSocket 合成（Dart TLS 指纹被微软 403，OkHttp 指纹放行） */
