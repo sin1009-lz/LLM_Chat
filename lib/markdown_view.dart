@@ -715,14 +715,14 @@ class _CodeBlock extends StatefulWidget {
 
 class _CodeBlockState extends State<_CodeBlock> {
   List<TextSpan>? _spans;
-  String? _coloredFor; // 当前 _spans 对应的 code（增量渲染锚点）
+  String? _visibleFor; // 当前 _spans 对应的显示文本（增量渲染锚点）
   int _req = 0; // 在途异步请求号（新请求/切同步路径时自增作废旧响应
 
   @override
   void initState() {
     super.initState();
     _spans = _treeToSpans(_parseTreeSync(widget.code, widget.lang));
-    _coloredFor = widget.code;
+    _visibleFor = _windowed(widget.code).$1;
   }
 
   static List<TextSpan> _treeToSpans(_HlTree? root) {
@@ -769,19 +769,21 @@ class _CodeBlockState extends State<_CodeBlock> {
 
   void _syncHighlight() {
     _req++; // 作废在途异步结果
-    _spans = _treeToSpans(_parseTreeSync(widget.code, widget.lang));
-    _coloredFor = widget.code;
+    final visible = _windowed(widget.code);
+    _spans = _treeToSpans(_parseTreeSync(visible.$1, widget.lang));
+    _visibleFor = visible.$1;
   }
 
   void _asyncHighlight() {
-    final code = widget.code;
+    final visible = _windowed(widget.code);
+    final code = visible.$1;
     final lang = widget.lang;
     final id = ++_req;
     _HighlightWorker.i().parse(code, lang).then((tree) {
       if (!mounted || id != _req) return;
       setState(() {
         _spans = _treeToSpans(tree);
-        _coloredFor = code;
+        _visibleFor = code;
       });
     }).catchError((_) {
       // worker 异常：同步兜底（卡一帧好过丢颜色）
@@ -803,18 +805,33 @@ class _CodeBlockState extends State<_CodeBlock> {
     _asyncHighlight();
   }
 
+  /// 流式开围栏的显示窗：SelectableText 对全文做布局是 O(全长)，
+  /// 几百行每帧重排 = 卡顿残余的根源。超窗块只渲染尾部 60 行
+  ///（Kimi/ChatGPT 同款：块内文字上滚、完成后展开全文）
+  (String, int) _windowed(String code) {
+    if (!widget.streaming) return (code, 0);
+    final lines = code.split('\n');
+    if (lines.length <= _streamWindowLines) return (code, 0);
+    final hidden = lines.length - _streamWindowLines;
+    return (lines.sublist(hidden).join('\n'), hidden);
+  }
+
+  static const _streamWindowLines = 60;
+
   @override
   Widget build(BuildContext context) {
     final spans = _spans;
-    final code = widget.code.isEmpty ? ' ' : widget.code;
-    // 增量：已着色前缀之后的新内容（异步结果到达前的 1-2 帧，
-    // append-only 校验失败则整块退纯文本）
+    final (visible, hidden) = _windowed(widget.code);
+    final code = visible.isEmpty ? ' ' : visible;
+    // 增量：已着色前缀之后的新内容（异步结果到达前的 1-2 帧）。
+    // 窗口滑动（顶部行被裁掉）时 startsWith 失败 → 渲染旧着色等新结果
     String? delta;
     if (spans != null &&
-        _coloredFor != null &&
-        widget.code.startsWith(_coloredFor!)) {
-      delta = widget.code.substring(_coloredFor!.length);
+        _visibleFor != null &&
+        visible.startsWith(_visibleFor!)) {
+      delta = visible.substring(_visibleFor!.length);
     }
+    final dim = const Color(0xFF6A9955);
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -831,9 +848,19 @@ class _CodeBlockState extends State<_CodeBlock> {
             height: 1.5,
             color: Color(0xFFD4D4D4),
           ),
-          children: spans == null
-              ? [TextSpan(text: code)]
-              : [...spans, if (delta != null && delta.isNotEmpty) TextSpan(text: delta)],
+          children: [
+            if (hidden > 0)
+              TextSpan(
+                text: '··· 已输出 $hidden 行，完成后完整展示 ···\n',
+                style: TextStyle(color: dim, fontSize: 11),
+              ),
+            if (spans == null)
+              TextSpan(text: code)
+            else ...[
+              ...spans,
+              if (delta != null && delta.isNotEmpty) TextSpan(text: delta),
+            ],
+          ],
         ),
       ),
     );
