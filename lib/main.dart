@@ -120,7 +120,7 @@ void _perfInit() {
     if (_perfLastReport == 0) _perfLastReport = now;
     if (now - _perfLastReport >= 5000 && _perfFrames > 0) {
       // ignore: avoid_print
-      print(
+      diagPrint(
         'PERF frames=$_perfFrames jank=$_perfJank '
         '(${(100 * _perfJank / _perfFrames).toStringAsFixed(1)}%) '
         'worst=${_perfWorst}ms',
@@ -703,7 +703,7 @@ class _HomePageState extends State<HomePage>
       final starts = startsFor(curIdx);
       if (starts.isEmpty) {
         if (diagDone.add(curIdx)) {
-          print(
+          diagPrint(
             'TTSDIAG no-starts item=$curIdx words=${words.length} '
             'sents=${curIdx < segSentences.length ? (segSentences[curIdx]?.length ?? -1) : -1}',
           );
@@ -726,13 +726,13 @@ class _HomePageState extends State<HomePage>
       if (sent != _speakingSent &&
           _speakingSeg?.$1 == m &&
           _speakingSeg?.$2 == curIdx) {
-        print('TTSDIAG pos=${p}ms w=$w sent=$sent starts=$starts');
+        diagPrint('TTSDIAG pos=${p}ms w=$w sent=$sent starts=$starts');
         setState(() => _speakingSent = sent);
       }
     });
     _speakingSent = -1;
     setState(() => _speakingSeg = (m, 0, segBlocks));
-    print(
+    diagPrint(
       'TTSDIAG q0 words=${first.words.length} '
       'sents=${segSentences.isEmpty ? -1 : (segSentences[0]?.length ?? -1)}',
     );
@@ -1511,7 +1511,7 @@ class _HomePageState extends State<HomePage>
           // 压缩失败（原生两路 + Dart 回退都解不了，如 HEIC 变体）：
           // 走兜底路径，不能把空/伪 jpeg 发给端点
           // ignore: avoid_print
-          print(
+          diagPrint(
             'COMPDIAG fail name=${att.name} bytes=${bytes.length} '
             'path=${att.path}',
           );
@@ -2254,6 +2254,7 @@ class _HomePageState extends State<HomePage>
           return;
         }
         try {
+          await _assertPublicHttpUrl(url);
           final res = await http
               .get(Uri.parse(url))
               .timeout(const Duration(seconds: 30));
@@ -2351,6 +2352,7 @@ class _HomePageState extends State<HomePage>
     // http(s) URL：直接下载（网页图片发送）
     if (p.startsWith('http://') || p.startsWith('https://')) {
       try {
+        await _assertPublicHttpUrl(p);
         final res = await http
             .get(Uri.parse(p))
             .timeout(const Duration(seconds: 15));
@@ -2534,6 +2536,7 @@ class _HomePageState extends State<HomePage>
     if (p.isEmpty) return null;
     try {
       if (p.startsWith('http://') || p.startsWith('https://')) {
+        await _assertPublicHttpUrl(p);
         final res = await http
             .get(Uri.parse(p))
             .timeout(const Duration(seconds: 15));
@@ -2564,7 +2567,7 @@ class _HomePageState extends State<HomePage>
       final mime = _mimeFromName(p);
       return 'data:$mime;base64,$b64';
     } catch (e) {
-      print('TOOLERR fetchImageForView($p): $e');
+      diagPrint('TOOLERR fetchImageForView($p): $e');
       return null;
     }
   }
@@ -2584,6 +2587,11 @@ class _HomePageState extends State<HomePage>
     var target = url.trim();
     if (target.isEmpty) {
       return (text: '[读取失败：url 为空]', images: const <String>[]);
+    }
+    try {
+      await _assertPublicHttpUrl(target);
+    } catch (e) {
+      return (text: '[读取失败：$e]', images: const <String>[]);
     }
     if (!target.startsWith('http://') && !target.startsWith('https://')) {
       target = 'https://$target';
@@ -2793,7 +2801,7 @@ class _HomePageState extends State<HomePage>
     }
     // 诊断：原始前缀（修复前）打 logcat
     // ignore: avoid_print
-    print(
+    diagPrint(
       'IMGDIAG n=${images.length} lens=${images.map((i) => i.dataUrl.length).join(',')} '
       'prefixes=${images.map((i) => i.dataUrl.substring(0, 36)).join(' | ')}',
     );
@@ -3158,7 +3166,7 @@ class _HomePageState extends State<HomePage>
           } catch (e) {
             resultText = '工具调用失败：$e';
             resultCode = -1;
-            print('TOOLERR ${call.name}: $e / ${StackTrace.current}');
+            diagPrint('TOOLERR ${call.name}: $e / ${StackTrace.current}');
           }
           if (!mounted) return;
           if (_stopRequested) {
@@ -3342,11 +3350,29 @@ class _HomePageState extends State<HomePage>
       _onRespondError(conv, assistantMsg, '未配置模型');
       return;
     }
-    // MCP 工具：有启用的服务器 → 收集工具走 ReAct 循环（模型自主调用工具）
-    final (mcpTools, toolMap) = await _collectMcpTools();
+    // MCP 工具：有启用的服务器 → 收集工具走 ReAct 循环（模型自主调用工具）。
+    // ⓪ 闸门提前到收集之前建立：收集可达数秒，旧时序里等待窗口内点停止
+    // 会走非 ReAct 停止路径删掉空助手消息，收集返回后 ReAct 照跑——
+    // 幽灵消息复活 + 停止失效
+    _isReactRunning = true;
+    _reactStopGate = Completer<void>();
+    List<Map<String, dynamic>> mcpTools = const [];
+    Map<String, (McpServer, McpToolDef)> toolMap = const {};
+    try {
+      final r = await _collectMcpTools();
+      mcpTools = r.$1;
+      toolMap = r.$2;
+    } catch (_) {
+      // 收集失败按无工具继续（纯文本流式）
+    }
+    if (_stopRequested && mcpTools.isEmpty) {
+      // 收集期间已停止且无工具：补走停止收尾（ReAct 循环未启动）
+      _isReactRunning = false;
+      _reactStopGate = null;
+      _finishStoppedResponding();
+      return;
+    }
     if (mcpTools.isNotEmpty) {
-      _isReactRunning = true;
-      _reactStopGate = Completer<void>();
       await _runMcpReact(
         conv,
         assistantMsg,
@@ -3359,6 +3385,9 @@ class _HomePageState extends State<HomePage>
       );
       return;
     }
+    // 无工具：退出 ReAct 态再走纯文本流式
+    _isReactRunning = false;
+    _reactStopGate = null;
     try {
       // 连接中断类错误自动重连（最多 5 次）：重试前清掉半截输出，
       // 新流从头填充，避免内容重复
@@ -4401,15 +4430,94 @@ class _HomePageState extends State<HomePage>
     await _persist(conv);
   }
 
+  /// ── 模型可驱动 URL 抓取的私网拦截（提示注入卫生）──
+  /// 四路收口：net_fetch 桥 / read_webpage / view_image / send_image(URL)。
+  /// 字面 IP 与 DNS 解析结果都校验（防 router.attacker.com → 192.168.1.1
+  /// 绕过字面检查）；TOCTOU 级防护（解析后重绑定）不在此场景做
+  Future<void> _assertPublicHttpUrl(String url) async {
+    final u = Uri.tryParse(url.trim());
+    if (u == null || (u.scheme != 'http' && u.scheme != 'https')) {
+      throw Exception('仅支持 http/https 地址');
+    }
+    final host = u.host.toLowerCase();
+    if (host.isEmpty || host.endsWith('.local') || host.endsWith('.internal')) {
+      throw Exception('禁止访问本地/内网地址（$host）');
+    }
+    final literal = InternetAddress.tryParse(host);
+    final addrs = literal != null
+        ? [literal]
+        : await InternetAddress.lookup(host);
+    for (final a in addrs) {
+      if (_isPrivateAddress(a.address)) {
+        throw Exception('禁止访问内网/环回地址（$host → ${a.address}）');
+      }
+    }
+  }
+
+  /// 私网/环回/链路本地/CGNAT/组播判定（v4 + v6 含 v4 映射）
+  static bool _isPrivateAddress(String raw) {
+    var ip = raw.toLowerCase().trim();
+    if (ip.startsWith('::ffff:') && ip.contains('.')) {
+      ip = ip.substring(7);
+    }
+    final parts = ip.split('.');
+    if (parts.length == 4) {
+      final p = parts.map(int.tryParse).toList();
+      if (p.length == 4 && p.every((e) => e != null && e! >= 0 && e <= 255)) {
+        final a = p[0]!, b = p[1]!;
+        return a == 0 || // 0.0.0.0/8
+            a == 10 || // 10/8
+            a == 127 || // 环回
+            (a == 100 && b >= 64 && b <= 127) || // CGNAT
+            (a == 169 && b == 254) || // 链路本地
+            (a == 172 && b >= 16 && b <= 31) || // 172.16/12
+            (a == 192 && b == 168) || // 192.168/16
+            a >= 224; // 组播/保留
+      }
+    }
+    return ip == '::1' ||
+        ip == '::' ||
+        ip.startsWith('fc') ||
+        ip.startsWith('fd') || // ULA
+        ip.startsWith('fe80'); // 链路本地
+  }
+
   /// 诊断：端点报错原文打 logcat（REQERR），复现后取证
   void _logReqErr(Object e) {
     // ignore: avoid_print
-    print('REQERR ${e.toString().substring(0, e.toString().length.clamp(0, 500))}');
+    diagPrint('REQERR ${e.toString().substring(0, e.toString().length.clamp(0, 500))}');
   }
 
-  /// 停止流式（保留已收部分）。若停止时助手消息完全为空
-  /// （还在思考/工具调用阶段，content 与 thinking 都没收到），删除该空气泡。
-  /// ReAct 循环用 await-for 无法 cancel，置标志位由循环自行中断清理
+  /// 停止收尾（共享）：最后一条助手消息完全为空则删除（不留空气泡），
+  /// 否则标记截断正常结束。_onStop 非 ReAct 分支与 ReAct 起步竞态窗口
+  ///（⓪）共用
+  void _finishStoppedResponding() {
+    final conv = _currentConversation;
+    if (conv == null || conv.messages.isEmpty) {
+      setState(() {
+        _isResponding = false;
+        _renderEpoch++;
+      });
+      return;
+    }
+    final last = conv.messages.last;
+    final isEmpty = last.role == Role.assistant &&
+        last.content.trim().isEmpty &&
+        (last.thinking?.trim().isEmpty ?? true) &&
+        (last.toolCalls?.isEmpty ?? true);
+    if (isEmpty) {
+      setState(() {
+        conv.messages.removeLast();
+        _isResponding = false;
+        _renderEpoch++;
+      });
+      _persist(conv);
+    } else {
+      last.truncated = true;
+      _finishResponding(conv, last);
+    }
+  }
+
   /// 生成期间前台服务：常驻通知保活（后台/息屏流式不断）
   Future<void> _startStreamService() async {
     if (await FlutterForegroundTask.isRunningService) return;
@@ -7646,46 +7754,29 @@ class _HomePageState extends State<HomePage>
         ),
       ],
     );
-    final children = <Widget>[];
-    for (var i = 0; i < rounds.length; i++) {
-      final m = rounds[i];
-      if (i > 0) {
-        // 轮与轮之间的横线分割
-        children.add(
-          Container(
-            height: 0.5,
-            margin: const EdgeInsets.symmetric(vertical: 10),
-            color: Colors.grey.withValues(alpha: 0.3),
-          ),
+    Widget hline({double v = 8}) => Container(
+          height: 0.5,
+          margin: EdgeInsets.symmetric(vertical: v),
+          color: Colors.grey.withValues(alpha: 0.3),
         );
-      }
+
+    // 单轮三要素：思考（扁平自折叠）/ 正文 / 工具行（图片按需）
+    List<Widget> roundBody(Message m) {
       final tcs = (m.toolCalls ?? const <ToolCallRecord>[])
           .where((t) => !t.silent)
           .toList();
       final hasText = m.content.trim().isNotEmpty;
       final hasThinking = m.displayThinking?.trim().isNotEmpty ?? false;
-      // 思考：扁平形态（无嵌卡），自带折叠交互
-      if (hasThinking)
-        children.add(
+      final parts = <Widget>[
+        if (hasThinking)
           _thinkingBlock(
             context,
             _displayCached(m.displayThinking!),
             streaming: false,
             flat: true,
           ),
-        );
-      // 思考与其余条目之间的横线
-      if (hasThinking && (hasText || tcs.isNotEmpty))
-        children.add(
-          Container(
-            height: 0.5,
-            margin: const EdgeInsets.symmetric(vertical: 8),
-            color: Colors.grey.withValues(alpha: 0.3),
-          ),
-        );
-      // 本轮正文（无壳直接渲染，与卡同底）
-      if (hasText)
-        children.add(
+        if (hasThinking && (hasText || tcs.isNotEmpty)) hline(),
+        if (hasText)
           _general.markdownEnabled
               ? MarkdownView(
                   text: _displayCached(m.displayContent),
@@ -7700,27 +7791,13 @@ class _HomePageState extends State<HomePage>
                   _displayCached(m.displayContent),
                   style: Theme.of(context).textTheme.bodyLarge,
                 ),
-        );
-      // 正文与工具之间的横线
-      if (hasText && tcs.isNotEmpty)
-        children.add(
-          Container(
-            height: 0.5,
-            margin: const EdgeInsets.symmetric(vertical: 8),
-            color: Colors.grey.withValues(alpha: 0.3),
-          ),
-        );
-      // 图片（如有）
-      if (m.imageParts?.isNotEmpty ?? false)
-        children.add(
+        if (hasText && tcs.isNotEmpty) hline(),
+        if (m.imageParts?.isNotEmpty ?? false)
           SizedBox(
             width: double.infinity,
             child: _imageGrid(context, m.imageParts!),
           ),
-        );
-      // 工具部分（收起/展开逻辑复用）
-      if (tcs.isNotEmpty)
-        children.add(
+        if (tcs.isNotEmpty)
           AnimatedSize(
             alignment: Alignment.topLeft,
             duration: const Duration(milliseconds: 220),
@@ -7728,7 +7805,14 @@ class _HomePageState extends State<HomePage>
             curve: Curves.easeOutCubic,
             child: _toolDividerContent(context, m),
           ),
-        );
+      ];
+      return parts;
+    }
+
+    final children = <Widget>[];
+    for (var i = 0; i < rounds.length; i++) {
+      if (i > 0) children.add(hline(v: 10));
+      children.addAll(roundBody(rounds[i]));
     }
     return Container(
       width: double.infinity,
@@ -7768,6 +7852,16 @@ class _HomePageState extends State<HomePage>
                   color: Colors.grey.withValues(alpha: 0.3),
                 ),
                 ...children,
+              ] else if (rounds.isNotEmpty) ...[
+                // 折叠态保三要素：最近一轮的思考/正文/工具行始终在场
+                //（思考自折叠、工具行本就紧凑），仅更早轮次收起——
+                // 旧版折叠把全部内容吞进一行头，过于激进
+                Container(
+                  height: 0.5,
+                  margin: const EdgeInsets.symmetric(vertical: 6),
+                  color: Colors.grey.withValues(alpha: 0.3),
+                ),
+                ...roundBody(rounds.last),
               ],
             ],
           ),
@@ -10307,6 +10401,18 @@ class _MessageItemState extends State<_MessageItem> {
 }
 
 
+/// 诊断日志总开关（release 默认关）：TTSDIAG/TOOLERR/PERF/COMPDIAG/
+/// IMGDIAG/REQERR 会把会话片段/URL 打进 logcat——排查现场问题时改
+/// true 重编
+const bool kDiagLog = false;
+
+void diagPrint(String s) {
+  if (kDiagLog) {
+    // ignore: avoid_print
+    print(s);
+  }
+}
+
 /// 工具等待被用户打断（_raceStop 闸门触发）：由工具层 catch 统一
 /// 吞掉——真正的收尾由循环检查点的 _stopRequested 分支执行
 class _Interrupted implements Exception {}
@@ -11692,7 +11798,7 @@ Future<Uint8List> compressSingleImageNative(
       w = math.max(1, (srcW * scale).round());
       h = math.max(1, (srcH * scale).round());
       // ignore: avoid_print
-      print('COMPDIAG dims $srcW x $srcH -> $w x $h');
+      diagPrint('COMPDIAG dims $srcW x $srcH -> $w x $h');
     }
     final result = await FlutterImageCompress.compressWithList(
       bytes,
@@ -11703,10 +11809,10 @@ Future<Uint8List> compressSingleImageNative(
     );
     if (result.isNotEmpty) return result;
     // ignore: avoid_print
-    print('COMPDIAG native empty bytes=${bytes.length}');
+    diagPrint('COMPDIAG native empty bytes=${bytes.length}');
   } catch (e) {
     // ignore: avoid_print
-    print('COMPDIAG native throw bytes=${bytes.length} e=$e');
+    diagPrint('COMPDIAG native throw bytes=${bytes.length} e=$e');
   }
   // 回退：纯 Dart（isolate 里执行）
   final dartResult = await compute(_compressSingleImageDart, {
@@ -11716,7 +11822,7 @@ Future<Uint8List> compressSingleImageNative(
   });
   if (dartResult.isEmpty) {
     // ignore: avoid_print
-    print('COMPDIAG dart empty bytes=${bytes.length}');
+    diagPrint('COMPDIAG dart empty bytes=${bytes.length}');
   }
   return dartResult;
 }

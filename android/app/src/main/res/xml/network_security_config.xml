@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 网络安全配置：全局禁明文，仅放行环回（Pyodide 内核 WebView 加载
+     http://127.0.0.1 需要）。注意 dart:io 的 HttpClient 不执行 NSC
+     （flutter#41619）——聊天/TTS 的 http:// 端点不受此配置约束，
+     由设置层对非环回 http:// 告警兜底 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
