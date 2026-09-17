@@ -2802,6 +2802,14 @@ class _HomePageState extends State<HomePage>
 
     // 停止时清理当前气泡：空则删除，非空则正常完成
     void finishOnStop() {
+    // 参数流式/执行中被停止的卡片：标失败防永久转圈
+    for (final c in current.toolCalls ?? <ToolCallRecord>[]) {
+      if (c.resultCount == null) {
+        c.resultCount = -1;
+        c.output ??= '（已停止）';
+      }
+    }
+
       _flushStreamBufferNow(); // 残余 delta 先上屏再判定空/截断
       final empty =
           current.content.trim().isEmpty &&
@@ -2836,6 +2844,8 @@ class _HomePageState extends State<HomePage>
         // 轮数上限 +1 留给最终回答，XML 调用见下方识别兜底
         final acc = StringBuffer();
         final pendingCalls = <int, ({String id, String name, String args})>{};
+        // 参数流式阶段的提前建卡（index → 卡片）：执行循环复用防重复
+        final pendingCards = <int, ToolCallRecord>{};
         // 本轮结束原因（'length' = 输出被截断）
         var roundFinish = '';
         // 连接中断自动重连（最多 5 次）：清本轮半截输出后重发同请求
@@ -2869,6 +2879,22 @@ class _HomePageState extends State<HomePage>
               name: existing.name + (tc.name ?? ''),
               args: existing.args + (tc.arguments ?? ''),
             );
+            // 提前建卡：参数流式期间界面即有状态（此前完全静默像卡死）。
+            // 复用「执行中」渲染态（转圈 + name：增量参数原文）
+            final call = pendingCalls[tc.index]!;
+            final existed = pendingCards[tc.index];
+            final card =
+                existed ?? ToolCallRecord(name: call.name, query: '');
+            if (existed == null) {
+              pendingCards[tc.index] = card;
+              setState(() => current.toolCalls!.add(card));
+            } else {
+              card.name = call.name;
+            }
+            card.query = call.args.length > 160
+                ? '${call.args.substring(0, 160)}…'
+                : call.args;
+            _bumpCardTick();
           }
         }
         // 无 JSON 工具调用 → 检查模型是否以 XML 文本形式输出了工具调用
@@ -2946,12 +2972,23 @@ class _HomePageState extends State<HomePage>
           final displayName = call.name.startsWith('builtin__')
               ? call.name.substring('builtin__'.length)
               : (toolDef?.$2.name ?? call.name);
-          final card = ToolCallRecord(
-            name: displayName,
-            query: _summarizeArgs(call.args),
-            silent: call.name == kBuiltinSendImageTool,
-          );
-          setState(() => current.toolCalls!.add(card));
+          // 复用参数流式阶段的提前卡（已渲染中）；XML 兜底路径无提前卡
+          final card =
+              pendingCards[entry.key] ??
+              ToolCallRecord(
+                name: displayName,
+                query: _summarizeArgs(call.args),
+                silent: call.name == kBuiltinSendImageTool,
+              );
+          if (pendingCards.containsKey(entry.key)) {
+            // 定稿：展示名 + 解析后的参数摘要（覆盖流式期间的原文增量）
+            card
+              ..name = displayName
+              ..query = _summarizeArgs(call.args)
+              ..silent = call.name == kBuiltinSendImageTool;
+          } else {
+            setState(() => current.toolCalls!.add(card));
+          }
 
           // 执行工具：内置工具走本地执行，MCP 工具走远程调用
           String resultText;
@@ -3349,6 +3386,25 @@ class _HomePageState extends State<HomePage>
   String _streamBufContent = '';
   Timer? _streamFlushTimer;
   Message? _streamMsg;
+
+  int _lastCardTickMs = 0;
+  Timer? _cardTickTimer;
+
+  /// 工具参数流式增量的卡片刷新（33ms 合并）：只改卡片字段 + tick，
+  /// 消息项比对签名自刷新，HomePage 零 setState
+  void _bumpCardTick() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastCardTickMs >= 33) {
+      _lastCardTickMs = now;
+      _streamTick.value++;
+      return;
+    }
+    _cardTickTimer ??= Timer(const Duration(milliseconds: 33), () {
+      _cardTickTimer = null;
+      _lastCardTickMs = DateTime.now().millisecondsSinceEpoch;
+      if (mounted) _streamTick.value++;
+    });
+  }
 
   /// 流式帧通知：流式期间每 33ms 只 tick 一次，消息项各自比对签名
   /// 决定是否自刷新——HomePage 整树 build 不再逐帧执行
@@ -10167,7 +10223,8 @@ class _MessageItemState extends State<_MessageItem> {
       ((_home?._speakSentenceOf(widget.message) ?? -1) + 2) * 9877 +
       (widget.message.toolCalls?.fold<int>(
             0,
-            (a, t) => a * 31 + (t.resultCount ?? -1000) + (t.expanded ? 7 : 0),
+            (a, t) =>
+                a * 31 + (t.resultCount ?? -1000) + (t.expanded ? 7 : 0) + t.query.length * 13,
           ) ??
           0) +
       widget.epoch * 1000003;

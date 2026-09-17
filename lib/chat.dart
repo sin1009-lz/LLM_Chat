@@ -413,10 +413,12 @@ class ToolCallRecord {
     this.silent = false,
   });
 
-  final String name;
+  /// 工具名：流式参数阶段先以原始名建卡，执行时替换展示名
+  String name;
 
-  /// 参数摘要（用于卡片副标题展示）
-  final String query;
+  /// 参数摘要（用于卡片副标题展示）；流式期间实时写入增量原文，
+  /// 执行前替换为解析后的摘要
+  String query;
 
   /// 结果状态：null = 进行中；-1 = 失败；>=0 = 成功（结果字符数）
   int? resultCount;
