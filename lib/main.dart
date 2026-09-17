@@ -7382,16 +7382,70 @@ class _HomePageState extends State<HomePage>
 
   /// 单张图片缩略图（缓存 provider 复用 + ResizeImage 限宽解码，
   /// 避免重复加载闪烁与解码内存开销）
-  /// SVG 图片判定：Flutter Image 解不了 SVG（显示空白/裂图），
-  /// 走 flutter_svg 渲染路径
-  static bool _isSvgImage(ImagePart img) =>
-      img.mimeType.contains('svg') ||
-      img.name.toLowerCase().endsWith('.svg') ||
-      img.dataUrl.startsWith('data:image/svg');
 
+  /// SVG → PNG 一次性光栅化缓存（keyed by dataUrl）：
+  /// 复杂 SVG 矢量即时渲染每帧重绘 = 卡顿根源；光栅化后进
+  /// 现有位图磁盘缓存，显示成本与普通照片完全同轨。
+  /// isolate 解码 + 根 isolate 编译绘制 + 引擎侧异步 toImage
+  static final Map<String, Future<Uint8List>> _svgPngFutures = {};
 
-  /// SVG 字节缓存（缩略图路径，镜像 _thumbFutures 语义）
-  static final Map<String, Future<Uint8List>> _svgBytesFutures = {};
+  Future<Uint8List> _svgToPngCached(String dataUrl) =>
+      _svgPngFutures.putIfAbsent(dataUrl, () async {
+        final comma = dataUrl.indexOf(',');
+        final b64 = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
+        final bytes = await compute((b) => base64Decode(b), b64);
+        return _svgToPngBytes(bytes).timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => throw Exception('SVG 光栅化超时'),
+        );
+      });
+
+  /// SVG 字节 → PNG：解析 viewBox 定目标尺寸（长边上限 2048，
+  /// 保纵横比），引擎侧光栅化。解析/绘制失败抛出（调用方走裂图）
+  static Future<Uint8List> _svgToPngBytes(Uint8List svgBytes) async {
+    final text = utf8.decode(svgBytes, allowMalformed: true);
+    final (vw, vh) = _svgViewBox(text);
+    var w = (vw * 2).round().clamp(64, 2048);
+    var h = (vh * 2).round().clamp(64, 2048);
+    if (vw <= 0 || vh <= 0) {
+      w = 1024;
+      h = 1024;
+    } else if (w == 2048 && h < 2048 * vh / vw) {
+      h = (2048 * vh / vw).round();
+    } else if (h == 2048 && w < 2048 * vw / vh) {
+      w = (2048 * vw / vh).round();
+    }
+    final info = await vg.loadPicture(SvgBytesLoader(svgBytes), null);
+    final image = await info.picture.toImage(w, h);
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    info.picture.dispose();
+    image.dispose();
+    if (data == null || data.lengthInBytes == 0) {
+      throw Exception('SVG 光栅化失败');
+    }
+    return data.buffer.asUint8List();
+  }
+
+  /// 从 SVG 文本解析视口：viewBox 优先，退 width/height 属性
+  static (double, double) _svgViewBox(String text) {
+    var m = RegExp(
+      r'''viewBox\s*=\s*["']\s*([\d.+-]+)[\s,]+([\d.+-]+)[\s,]+([\d.+-]+)[\s,]+([\d.+-]+)''',
+    ).firstMatch(text);
+    if (m != null) {
+      final w = double.tryParse(m.group(3)!) ?? 0;
+      final h = double.tryParse(m.group(4)!) ?? 0;
+      if (w > 0 && h > 0) return (w, h);
+    }
+    m = RegExp(
+      r'''<svg[^>]*?\swidth\s*=\s*["']([\d.]+)''',
+    ).firstMatch(text);
+    final w = m != null ? (double.tryParse(m.group(1)!) ?? 0) : 0.0;
+    m = RegExp(
+      r'''<svg[^>]*?\sheight\s*=\s*["']([\d.]+)''',
+    ).firstMatch(text);
+    final h = m != null ? (double.tryParse(m.group(1)!) ?? 0) : 0.0;
+    return (w, h);
+  }
 
   Widget _cachedImageThumb(BuildContext context, ImagePart img) {
     return GestureDetector(
@@ -7400,50 +7454,33 @@ class _HomePageState extends State<HomePage>
       onLongPress: () => saveImageToGallery(context, img.dataUrl),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        // SVG：flutter_svg 渲染（Flutter Image 解不了 SVG）
-        child: _isSvgImage(img)
-            ? FutureBuilder<Uint8List>(
-                future: _svgBytesFutures.putIfAbsent(
-                  img.displayUrl,
-                  () => compute(
-                    (u) {
-                      final c = u.indexOf(',');
-                      return base64Decode(c >= 0 ? u.substring(c + 1) : u);
-                    },
-                    img.displayUrl,
-                  ),
-                ),
-                builder: (context, snap) => snap.data == null
-                    ? Container(color: Colors.black12)
-                    : SvgPicture.memory(
-                        snap.data!,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const Icon(
-                          Icons.broken_image_outlined,
-                          color: Colors.white54,
-                        ),
-                      ),
-              )
-            : _rasterThumb(img),
+        // 文件 provider：FileImage 解码在异步线程池，磁盘缓存命中近零
+        // 成本；SVG 已在落盘前光栅化为 PNG——缩略图与普通照片同轨
+        child: _rasterThumb(img),
       ),
     );
   }
 
   Widget _rasterThumb(ImagePart img) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(10),
-      // 文件 provider：FileImage 解码在 Flutter 异步线程池（UI 线程
-        // 零阻塞），磁盘缓存命中后接近零成本——彻底替代 UI 线程同步
-        // base64Decode 的 MemoryImage 路径
-        child: FutureBuilder<FileImage>(
-          // future 缓存：同一张图的 Future 只创建一次（每次 build
-          // 新建 Future 会让 FutureBuilder 回到 pending → 占位/图片
-          // 交替闪烁——有图时动画奇怪的根源）
-          future: _thumbFutures.putIfAbsent(
-            img.displayUrl,
-            () => _fileImageFor(img.displayUrl),
-          ),
-          builder: (context, snap) => snap.data == null
+    return FutureBuilder<FileImage>(
+      // future 缓存：同一张图的 Future 只创建一次（每次 build
+      // 新建 Future 会让 FutureBuilder 回到 pending → 占位/图片
+      // 交替闪烁——有图时动画奇怪的根源）
+      future: _thumbFutures.putIfAbsent(
+        img.displayUrl,
+        () => _fileImageFor(img.displayUrl),
+      ),
+      // SVG 光栅化失败（超时/损坏）→ 裂图态
+      builder: (context, snap) => snap.hasError
+          ? Container(
+              color: Colors.black26,
+              alignment: Alignment.center,
+              child: const Icon(
+                Icons.broken_image_outlined,
+                color: Colors.white54,
+              ),
+            )
+          : snap.data == null
               ? Container(
                   color: Colors.black12,
                   child: const Center(
@@ -7487,7 +7524,6 @@ class _HomePageState extends State<HomePage>
                     ),
                   ),
                 ),
-        ),
       );
   }
 
@@ -7521,8 +7557,11 @@ class _HomePageState extends State<HomePage>
     final name = 'img_${dataUrl.hashCode.abs()}.jpg';
     final f = File('${dir.path}/$name');
     if (!f.existsSync()) {
-      // base64 解码 + 落盘在 isolate：UI 线程零卡顿
-      final bytes = await compute(_b64ToBytes, dataUrl);
+      // base64 解码 + 落盘在 isolate：UI 线程零卡顿。
+      // SVG：光栅化为 PNG 再落盘（后续命中缓存 = 纯位图路径）
+      final bytes = dataUrl.startsWith('data:image/svg')
+          ? await _svgToPngCached(dataUrl)
+          : await compute(_b64ToBytes, dataUrl);
       await f.writeAsBytes(bytes, flush: true);
     }
     final img = FileImage(f);
@@ -7541,13 +7580,22 @@ class _HomePageState extends State<HomePage>
 
   /// 打开全屏图片画廊：收集当前会话全部图片（消息顺序），左右滑动
   /// 浏览；[dataUrl] 定位初始页
-  /// SVG dataUrl → 原始字节（SVG 是小体量文本，同步解码可接受）
-  static Uint8List _svgBytesSync(String dataUrl) {
-    final c = dataUrl.indexOf(',');
-    return base64Decode(c >= 0 ? dataUrl.substring(c + 1) : dataUrl);
+  /// SVG dataUrl → PNG 位图 provider（一次性光栅化，结果进
+  /// _imageCache 与普通图片同轨 LRU）
+  Future<ImageProvider> _svgProviderFor(String dataUrl) async {
+    final hit = _imageCache.remove(dataUrl);
+    if (hit != null) {
+      _imageCache[dataUrl] = hit;
+      return hit;
+    }
+    final png = await _svgToPngCached(dataUrl);
+    final img = MemoryImage(png);
+    _imageCache[dataUrl] = img;
+    _imageCacheBytes += png.length;
+    return img;
   }
 
-  void _openImageGallery(String dataUrl) {
+  Future<void> _openImageGallery(String dataUrl) async {
     final urls = <String>[];
     for (final m in _currentConversation?.messages ?? const <Message>[]) {
       for (final img in m.imageParts ?? const <ImagePart>[]) {
@@ -7556,15 +7604,20 @@ class _HomePageState extends State<HomePage>
     }
     if (urls.isEmpty) return;
     final idx = urls.indexOf(dataUrl);
+    final images = <_FullImg>[
+      for (final u in urls)
+        _FullImg(
+          provider: u.startsWith('data:image/svg')
+              ? await _svgProviderFor(u)
+              : _imageProviderFor(u),
+          dataUrl: u,
+        ),
+    ];
+    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => _ImageFullscreen(
-          images: [
-            for (final u in urls)
-              u.startsWith('data:image/svg')
-                  ? _FullImg(svg: _svgBytesSync(u), dataUrl: u)
-                  : _FullImg(provider: _imageProviderFor(u), dataUrl: u),
-          ],
+          images: images,
           initialIndex: idx < 0 ? 0 : idx,
         ),
       ),
@@ -8063,10 +8116,17 @@ class _HomePageState extends State<HomePage>
                   // 点击产图 → 全屏查看（复用聊天图片缓存 provider）
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(
-                      builder: (_) => _ImageFullscreen(
-                        images: imgs[i].startsWith('data:image/svg')
-                            ? [_FullImg(svg: _svgBytesSync(imgs[i]), dataUrl: imgs[i])]
-                            : [_FullImg(provider: _imageProviderFor(imgs[i]), dataUrl: imgs[i])],
+                      builder: (_) => FutureBuilder<ImageProvider>(
+                        future: imgs[i].startsWith('data:image/svg')
+                            ? _svgProviderFor(imgs[i])
+                            : Future.value(_imageProviderFor(imgs[i])),
+                        builder: (context, snap) => snap.data == null
+                            ? const SizedBox.shrink()
+                            : _ImageFullscreen(
+                                images: [
+                                  _FullImg(provider: snap.data!, dataUrl: imgs[i]),
+                                ],
+                              ),
                       ),
                     ),
                   ),
@@ -11070,12 +11130,11 @@ Future<void> saveImageToGallery(BuildContext context, String dataUrl) async {
   }
 }
 
-/// 全屏查看的图片条目：位图走 provider，SVG 走 flutter_svg 字节
-///（Flutter Image 解不了 SVG）；dataUrl 保留供长按保存
+/// 全屏查看的图片条目。SVG 在进查看器前已光栅化为 PNG（位图
+/// provider）；dataUrl 保留原始串供长按保存（SVG 存原文件）
 class _FullImg {
-  _FullImg({this.provider, this.svg, required this.dataUrl});
-  final ImageProvider? provider;
-  final Uint8List? svg;
+  _FullImg({required this.provider, required this.dataUrl});
+  final ImageProvider provider;
   final String dataUrl;
 }
 
@@ -11121,17 +11180,8 @@ class _ImageFullscreenState extends State<_ImageFullscreen> {
                 onPageChanged: (i) => setState(() => _index = i),
                 builder: (context, i) {
                   final e = widget.images[i];
-                  if (e.svg != null) {
-                    return PhotoViewGalleryPageOptions.customChild(
-                      child: SvgPicture.memory(e.svg!),
-                      initialScale: PhotoViewComputedScale.contained,
-                      minScale: PhotoViewComputedScale.contained,
-                      maxScale: 8.0,
-                      onTapUp: (_, _, _) => Navigator.of(context).pop(),
-                    );
-                  }
                   return PhotoViewGalleryPageOptions(
-                    imageProvider: e.provider!,
+                    imageProvider: e.provider,
                     // 初始 contain（整图可见，无黑边）；放大上限 8 倍
                     initialScale: PhotoViewComputedScale.contained,
                     minScale: PhotoViewComputedScale.contained,
