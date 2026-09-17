@@ -1136,6 +1136,23 @@ class _HomePageState extends State<HomePage>
   /// 停止请求标志（ReAct 循环在检查点中断并清理）
   bool _stopRequested = false;
 
+  /// 工具等待打断闸门：_onStop 时 complete——所有 _raceStop 挂起的
+  /// 工具等待立即以 _Interrupted 退出（不等真实工具返回；其后台继续
+  /// 跑完、结果丢弃）。此前等待工具返回期间点停止毫无反应：
+  /// MCP 调用无超时，卡死的工具让停止按钮永远无效
+  Completer<void>? _reactStopGate;
+
+  /// 工具等待与打断竞速：闸门触发立即抛 _Interrupted（由工具层
+  /// catch 统一处理 → 下一检查点 finishOnStop 退出），正常返回原值
+  Future<T> _raceStop<T>(Future<T> f) {
+    final gate = _reactStopGate;
+    if (gate == null || gate.isCompleted) return f;
+    return Future.any([
+      f,
+      gate.future.then((_) => throw _Interrupted()),
+    ]);
+  }
+
   /// 本次响应是否被截断（finish_reason = length；写回 assistantMsg.truncated）
   bool _lastTruncated = false;
 
@@ -2947,11 +2964,11 @@ class _HomePageState extends State<HomePage>
               if (call.name == kBuiltinPythonTool) {
                 // Python：code 参数（兼容 query 槽位），120s 整体超时
                 //（含首次 WASM 内核启动 ~10s 与自动装包）；产图挂卡片
-                final r = await _runPythonCode(
+                final r = await _raceStop(_runPythonCode(
                   (args['code'] as String?) ??
                       (args['query'] as String?) ??
                       '',
-                ).timeout(
+                )).timeout(
                   const Duration(seconds: 120),
                   onTimeout: () => (
                     text: 'Python 执行超时（120 秒，含内核启动/装包），已中止',
@@ -2969,10 +2986,10 @@ class _HomePageState extends State<HomePage>
               } else if (call.name == kBuiltinSendImageTool) {
                 // 发图给用户：读 Python 保存的文件 → 挂到本条助手消息
                 // 的 imageParts（聊天气泡显示）；60s 超时兜底
-                final r = await _sendImageTool(
+                final r = await _raceStop(_sendImageTool(
                   (args['path'] as String?) ?? '',
                   caption: (args['caption'] as String?) ?? '',
-                ).timeout(
+                )).timeout(
                   const Duration(seconds: 60),
                   onTimeout: () => '读取图片超时（60 秒），请重试',
                 );
@@ -2980,9 +2997,9 @@ class _HomePageState extends State<HomePage>
                 resultCode = resultText.startsWith('[图片已发送') ? 1 : -1;
               } else if (call.name == kBuiltinReadWebTool) {
                 // 读网页（本地两级链路）；60s 网络超时
-                final r = await _readWebpage(
+                final r = await _raceStop(_readWebpage(
                   (args['url'] as String?) ?? (args['query'] as String?) ?? '',
-                ).timeout(
+                )).timeout(
                   const Duration(seconds: 60),
                   onTimeout: () => (
                     text: '[读取超时（60 秒），请稍后重试]',
@@ -2996,7 +3013,7 @@ class _HomePageState extends State<HomePage>
                       '\n[网页图片 ${r.images.length} 张，可用 view_image(url) 查看或 '
                       'send_image(path=url) 发送给用户：${r.images.take(8).join(' ')}]';
                   // 下载进工具卡（点开即可看）
-                  final dl = await _downloadWebImages(r.images);
+                  final dl = await _raceStop(_downloadWebImages(r.images));
                   if (dl.isNotEmpty) card.images = dl;
                 }
                 card.output = resultText.length > 4000
@@ -3008,9 +3025,9 @@ class _HomePageState extends State<HomePage>
                     : resultText.length;
               } else if (call.name == kBuiltinViewImageTool) {
                 // 查看图片：下载 → 作为视觉输入注入 tool 消息
-                final du = await _fetchImageForView(
+                final du = await _raceStop(_fetchImageForView(
                   (args['url'] as String?) ?? (args['path'] as String?) ?? '',
-                ).timeout(
+                )).timeout(
                   const Duration(seconds: 30),
                   onTimeout: () => null,
                 );
@@ -3025,10 +3042,10 @@ class _HomePageState extends State<HomePage>
                 card.output = resultText;
               } else {
                 resultText =
-                    await _execBuiltinTool(
+                    await _raceStop(_execBuiltinTool(
                       call.name,
                       query: (args['query'] as String?) ?? '',
-                    ).timeout(
+                    )).timeout(
                       // 内置工具整体超时（位置工具含权限弹窗 + 定位，需留足时间）
                       const Duration(seconds: 35),
                       onTimeout: () => '内置工具调用超时（35 秒），请稍后重试',
@@ -3040,7 +3057,9 @@ class _HomePageState extends State<HomePage>
               final server = toolDef!.$1;
               final client = _mcpClients[server.id]!;
               final args = _parseArgs(call.args);
-              final result = await client.callTool(toolDef.$2.name, args);
+              final result = await _raceStop(
+                client.callTool(toolDef.$2.name, args),
+              ).timeout(const Duration(seconds: 120));
               resultText = result.text.isEmpty ? '(空结果)' : result.text;
               resultCode = resultText.length;
             }
@@ -3120,6 +3139,7 @@ class _HomePageState extends State<HomePage>
       if (mounted) _onRespondError(conv, current, e);
     } finally {
       _isReactRunning = false;
+      _reactStopGate = null;
     }
   }
 
@@ -3233,6 +3253,7 @@ class _HomePageState extends State<HomePage>
     final (mcpTools, toolMap) = await _collectMcpTools();
     if (mcpTools.isNotEmpty) {
       _isReactRunning = true;
+      _reactStopGate = Completer<void>();
       await _runMcpReact(
         conv,
         assistantMsg,
@@ -4298,6 +4319,9 @@ class _HomePageState extends State<HomePage>
     _stopStreamService();
     if (_isReactRunning) {
       _stopRequested = true;
+      // 等待工具返回期间打断：即刻放行（不等真实返回，后台跑完丢弃）
+      final gate = _reactStopGate;
+      if (gate != null && !gate.isCompleted) gate.complete();
       return;
     }
     final conv = _currentConversation;
@@ -10168,6 +10192,11 @@ class _MessageItemState extends State<_MessageItem> {
     );
   }
 }
+
+
+/// 工具等待被用户打断（_raceStop 闸门触发）：由工具层 catch 统一
+/// 吞掉——真正的收尾由循环检查点的 _stopRequested 分支执行
+class _Interrupted implements Exception {}
 
 /// HomePage State 暴露作用域：让 _MessageItem 等子组件访问其方法
 class _HomePageScope extends InheritedWidget {
