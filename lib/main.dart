@@ -7389,62 +7389,64 @@ class _HomePageState extends State<HomePage>
   /// isolate 解码 + 根 isolate 编译绘制 + 引擎侧异步 toImage
   static final Map<String, Future<Uint8List>> _svgPngFutures = {};
 
-  Future<Uint8List> _svgToPngCached(String dataUrl) =>
-      _svgPngFutures.putIfAbsent(dataUrl, () async {
-        final comma = dataUrl.indexOf(',');
-        final b64 = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
-        final bytes = await compute((b) => base64Decode(b), b64);
-        return _svgToPngBytes(bytes).timeout(
-          const Duration(seconds: 5),
-          onTimeout: () => throw Exception('SVG 光栅化超时'),
-        );
-      });
-
-  /// SVG 字节 → PNG：解析 viewBox 定目标尺寸（长边上限 2048，
-  /// 保纵横比），引擎侧光栅化。解析/绘制失败抛出（调用方走裂图）
-  static Future<Uint8List> _svgToPngBytes(Uint8List svgBytes) async {
-    final text = utf8.decode(svgBytes, allowMalformed: true);
-    final (vw, vh) = _svgViewBox(text);
-    var w = (vw * 2).round().clamp(64, 2048);
-    var h = (vh * 2).round().clamp(64, 2048);
-    if (vw <= 0 || vh <= 0) {
-      w = 1024;
-      h = 1024;
-    } else if (w == 2048 && h < 2048 * vh / vw) {
-      h = (2048 * vh / vw).round();
-    } else if (h == 2048 && w < 2048 * vw / vh) {
-      w = (2048 * vw / vh).round();
-    }
-    final info = await vg.loadPicture(SvgBytesLoader(svgBytes), null);
-    final image = await info.picture.toImage(w, h);
-    final data = await image.toByteData(format: ui.ImageByteFormat.png);
-    info.picture.dispose();
-    image.dispose();
-    if (data == null || data.lengthInBytes == 0) {
-      throw Exception('SVG 光栅化失败');
-    }
-    return data.buffer.asUint8List();
+  Future<Uint8List> _svgToPngCached(String dataUrl) {
+    final hit = _svgPngFutures[dataUrl];
+    if (hit != null) return hit;
+    late final Future<Uint8List> f;
+    f = () async {
+      final comma = dataUrl.indexOf(',');
+      final b64 = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
+      final bytes = await compute((b) => base64Decode(b), b64);
+      return _svgToPngBytes(bytes).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => throw Exception('SVG 光栅化超时'),
+      );
+    }();
+    _svgPngFutures[dataUrl] = f;
+    // 失败清除缓存条目：下次重试而非永久失败（吞掉旁路未处理异常）
+    f.then(
+      (_) {},
+      onError: (_) {
+        if (identical(_svgPngFutures[dataUrl], f)) {
+          _svgPngFutures.remove(dataUrl);
+        }
+      },
+    );
+    return f;
   }
 
-  /// 从 SVG 文本解析视口：viewBox 优先，退 width/height 属性
-  static (double, double) _svgViewBox(String text) {
-    var m = RegExp(
-      r'''viewBox\s*=\s*["']\s*([\d.+-]+)[\s,]+([\d.+-]+)[\s,]+([\d.+-]+)[\s,]+([\d.+-]+)''',
-    ).firstMatch(text);
-    if (m != null) {
-      final w = double.tryParse(m.group(3)!) ?? 0;
-      final h = double.tryParse(m.group(4)!) ?? 0;
-      if (w > 0 && h > 0) return (w, h);
+  /// SVG 字节 → PNG：以 PictureInfo.size（真实视口）为准，缩放重录
+  /// 后光栅化——picture.toImage 不做缩放，坐标空间与目标尺寸不一致
+  /// 时会错位/裁剪（直接 toImage 的 bug 根源）。长边上限 2048 保纵横比
+  static Future<Uint8List> _svgToPngBytes(Uint8List svgBytes) async {
+    final info = await vg.loadPicture(SvgBytesLoader(svgBytes), null);
+    try {
+      var sw = info.size.width;
+      var sh = info.size.height;
+      if (!sw.isFinite || !sh.isFinite || sw <= 0 || sh <= 0) {
+        // 无视口信息：按方形兜底
+        sw = 1024;
+        sh = 1024;
+      }
+      final scale = 2048 / math.max(sw, sh);
+      final w = (sw * scale).round().clamp(64, 2048);
+      final h = (sh * scale).round().clamp(64, 2048);
+      final rec = ui.PictureRecorder();
+      final canvas = Canvas(rec);
+      canvas.scale(w / sw, h / sh);
+      canvas.drawPicture(info.picture);
+      final framed = rec.endRecording();
+      final image = await framed.toImage(w, h);
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      framed.dispose();
+      image.dispose();
+      if (data == null || data.lengthInBytes == 0) {
+        throw Exception('SVG 光栅化失败');
+      }
+      return data.buffer.asUint8List();
+    } finally {
+      info.picture.dispose();
     }
-    m = RegExp(
-      r'''<svg[^>]*?\swidth\s*=\s*["']([\d.]+)''',
-    ).firstMatch(text);
-    final w = m != null ? (double.tryParse(m.group(1)!) ?? 0) : 0.0;
-    m = RegExp(
-      r'''<svg[^>]*?\sheight\s*=\s*["']([\d.]+)''',
-    ).firstMatch(text);
-    final h = m != null ? (double.tryParse(m.group(1)!) ?? 0) : 0.0;
-    return (w, h);
   }
 
   Widget _cachedImageThumb(BuildContext context, ImagePart img) {
@@ -7603,22 +7605,34 @@ class _HomePageState extends State<HomePage>
       }
     }
     if (urls.isEmpty) return;
-    final idx = urls.indexOf(dataUrl);
-    final images = <_FullImg>[
-      for (final u in urls)
-        _FullImg(
-          provider: u.startsWith('data:image/svg')
-              ? await _svgProviderFor(u)
-              : _imageProviderFor(u),
-          dataUrl: u,
-        ),
-    ];
+    var idx = urls.indexOf(dataUrl);
+    if (idx < 0) idx = 0;
+    // 逐张容错：单张 SVG 光栅化失败只跳过该张（此前异常冒泡会
+    // 中断整个相册打开 = 「图片点不开」的根源），索引按跳过数修正
+    final images = <_FullImg>[];
+    var skippedBefore = 0;
+    for (var i = 0; i < urls.length; i++) {
+      final u = urls[i];
+      try {
+        images.add(
+          _FullImg(
+            provider: u.startsWith('data:image/svg')
+                ? await _svgProviderFor(u)
+                : _imageProviderFor(u),
+            dataUrl: u,
+          ),
+        );
+      } catch (_) {
+        if (i < idx) skippedBefore++;
+      }
+    }
+    if (images.isEmpty) return;
     if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => _ImageFullscreen(
           images: images,
-          initialIndex: idx < 0 ? 0 : idx,
+          initialIndex: (idx - skippedBefore).clamp(0, images.length - 1),
         ),
       ),
     );
