@@ -35,6 +35,7 @@ class GeneralSettings {
     required this.imageCompressEnabled,
     required this.imageMaxMegapixels,
     required this.quickNavEnabled,
+    required this.displayMode,
     required this.titleStrategy,
     required this.aiTitleModel,
     required this.aiTitlePrompt,
@@ -66,6 +67,7 @@ class GeneralSettings {
   static const defaults = GeneralSettings(
     pasteLongTextAsFile: true,
     quickNavEnabled: true,
+    displayMode: 0,
     imageCompressEnabled: true,
     imageMaxMegapixels: 1.69,
     pasteThreshold: 2000,
@@ -110,6 +112,9 @@ class GeneralSettings {
 
   /// 上滑快捷导航（回到顶部/上一条消息/回到底部）开关
   final bool quickNavEnabled;
+
+  /// 显示模式：0 自动（短边 ≥600dp 判平板）/ 1 始终手机 / 2 始终平板
+  final int displayMode;
 
   /// 发送图片压缩开关（关 = 原图直传，受 4MB/8192px 安全校验）
   final bool imageCompressEnabled;
@@ -223,6 +228,7 @@ class GeneralSettings {
     bool? pdfAsImage,
     bool? contextPercent,
     bool? quickNavEnabled,
+    int? displayMode,
     bool? imageCompressEnabled,
     double? imageMaxMegapixels,
     int? reactMaxRounds,
@@ -230,6 +236,7 @@ class GeneralSettings {
     pasteLongTextAsFile: pasteLongTextAsFile ?? this.pasteLongTextAsFile,
     pasteThreshold: pasteThreshold ?? this.pasteThreshold,
     quickNavEnabled: quickNavEnabled ?? this.quickNavEnabled,
+    displayMode: displayMode ?? this.displayMode,
     imageCompressEnabled: imageCompressEnabled ?? this.imageCompressEnabled,
     imageMaxMegapixels: imageMaxMegapixels ?? this.imageMaxMegapixels,
     titleStrategy: titleStrategy ?? this.titleStrategy,
@@ -264,6 +271,7 @@ class GeneralSettings {
     'pasteLongTextAsFile': pasteLongTextAsFile,
     'pasteThreshold': pasteThreshold,
     'quickNavEnabled': quickNavEnabled,
+    'displayMode': displayMode,
     'imageCompressEnabled': imageCompressEnabled,
     'imageMaxMegapixels': imageMaxMegapixels,
     'titleStrategy': titleStrategy.toJson(),
@@ -343,6 +351,7 @@ class GeneralSettings {
       contextPercent: j['contextPercent'] as bool? ?? d.contextPercent,
       reactMaxRounds:
           (j['reactMaxRounds'] as num?)?.toInt() ?? d.reactMaxRounds,
+      displayMode: (j['displayMode'] as num?)?.toInt() ?? d.displayMode,
     );
   }
 

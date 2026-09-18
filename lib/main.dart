@@ -139,7 +139,8 @@ void main() {
   _perfInit();
   // 沉浸式：内容延伸到状态栏后面
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  // 锁定竖屏（与 AndroidManifest screenOrientation 双保险）
+  // 屏幕方向由 HomePage 按显示模式应用（平板=自由旋转/手机=竖屏）；
+  // 启动瞬间先竖屏，避免手机上启动横闪
   SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
   // 预热模糊 shader，避免首帧卡顿
   Inspire.warmUp();
@@ -1100,6 +1101,31 @@ class _HomePageState extends State<HomePage>
 
   /// 通用设置（粘贴/标题策略/AI标题/渲染开关；本地持久化）
   GeneralSettings _general = GeneralSettings.defaults;
+
+  /// 平板模式判定：显示模式覆盖优先（1=手机 2=平板），
+  /// 自动档按短边 ≥600dp（标准平板断点）
+  bool get _isTablet {
+    final mode = _general.displayMode;
+    if (mode == 1) return false;
+    if (mode == 2) return true;
+    final mq = View.of(context).physicalSize / View.of(context).devicePixelRatio;
+    return mq.shortestSide >= 600;
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    // 旋转/尺寸变化：自动模式可能跨 600dp 断点，重判模式与方向策略
+    _applyOrientation();
+  }
+
+  /// 屏幕方向策略：平板模式放开全部方向，手机模式锁竖屏
+  void _applyOrientation() {
+    if (!mounted) return;
+    SystemChrome.setPreferredOrientations(
+      _isTablet ? const [] : const [DeviceOrientation.portraitUp],
+    );
+  }
 
   /// 文字替换规则（显示层替换，来自设置页；发送/显示时应用）
   List<TextReplaceRule> _replaceRules = [];
@@ -4785,6 +4811,11 @@ class _HomePageState extends State<HomePage>
           generalSettings: _general,
           onGeneralSettingsChanged: (s) {
             _renderEpoch++;
+            // 显示模式切换时同步屏幕方向策略
+            if (s.displayMode != _general.displayMode) {
+              _general = s;
+              _applyOrientation();
+            }
             // 通用设置变更：立即生效 + 固化存档
             setState(() => _general = s);
             _store?.saveGeneralSettings(s);
@@ -5437,6 +5468,8 @@ class _HomePageState extends State<HomePage>
         }
         // 通用设置（粘贴/标题/渲染开关）启动时恢复
         _general = s.loadGeneralSettings();
+        // 设置恢复后应用屏幕方向策略（平板=自由旋转）
+        _applyOrientation();
       });
       // 自动归档/清理（启动时检查一次 + 每 6 小时周期检查）
       _maintainConversations();
@@ -5824,7 +5857,9 @@ class _HomePageState extends State<HomePage>
           bottom: 0,
           left: 0,
           right: 0,
-          child: _GlassInputBar(
+          // 宽屏限宽 760 后居中（手机上与区域同宽，Center 无感）
+          child: Center(
+            child: _GlassInputBar(
             onAddImage: _pickImages,
             onTakePhoto: _takePhoto,
             onAddFile: _pickFiles,
@@ -5864,6 +5899,7 @@ class _HomePageState extends State<HomePage>
             hasAttachments: _attachments.isNotEmpty,
             attachmentsAllLoading:
                 _attachments.isNotEmpty && _attachments.every((a) => a.loading),
+          ),
           ),
         ),
         // ── 上滑快捷导航（竖排悬浮；通用设置可关）──
@@ -6000,6 +6036,51 @@ class _HomePageState extends State<HomePage>
           ),
       ],
     );
+
+    // 平板模式：常驻侧栏（会话列表，复用抽屉内容；320 固定宽，
+    // 内容宽度公式在窄容器内自然收敛）+ 主区。主区用 MediaQuery
+    // 覆写把「屏宽」替换为主区宽——气泡/输入栏/页眉等全部内部
+    // MediaQuery.sizeOf 自动适配，无需逐处改
+    if (_isTablet) {
+      return _HomePageScope(
+        state: this,
+        child: Scaffold(
+          resizeToAvoidBottomInset: false,
+          body: Row(
+            children: [
+              SizedBox(
+                width: 320,
+                child: RepaintBoundary(
+                  child: _buildDrawer(topPad: topPad),
+                ),
+              ),
+              // 分隔线（与抽屉右缘投影同语义，静态无开销）
+              Container(width: 1, color: Colors.black.withValues(alpha: 0.08)),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final mq = MediaQuery.of(context);
+                    return MediaQuery(
+                      data: mq.copyWith(
+                        size: Size(constraints.maxWidth, constraints.maxHeight),
+                      ),
+                      child: Stack(
+                        children: [
+                          Container(
+                            color: Theme.of(context).scaffoldBackgroundColor,
+                          ),
+                          mainContent,
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     return _HomePageScope(
       state: this,
@@ -6219,7 +6300,7 @@ class _HomePageState extends State<HomePage>
     });
   }
 
-  /// 系统提示词卡片（llama-ui 风格：虚线卡片 + 操作按钮 + 内联编辑）
+  /// 系统提示词卡片：虚线边框 + 操作按钮 + 内联编辑
   Widget _systemCard(BuildContext context) {
     final text = _prompt ?? '';
     // 内联编辑态：textarea + Cancel/Save
@@ -6229,7 +6310,10 @@ class _HomePageState extends State<HomePage>
         alignment: Alignment.centerRight, // System 卡片靠右
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+            maxWidth: math.max(
+              260,
+              math.min(MediaQuery.sizeOf(context).width * 0.82, 720),
+            ),
           ),
           child: Container(
             padding: const EdgeInsets.all(10),
@@ -6346,7 +6430,10 @@ class _HomePageState extends State<HomePage>
       alignment: Alignment.centerRight, // System 卡片靠右
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+          maxWidth: math.max(
+              260,
+              math.min(MediaQuery.sizeOf(context).width * 0.82, 720),
+            ),
         ),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -6749,7 +6836,10 @@ class _HomePageState extends State<HomePage>
               (m.displayThinking?.isNotEmpty ?? false))
             ConstrainedBox(
               constraints: BoxConstraints(
-                maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+                maxWidth: math.max(
+              260,
+              math.min(MediaQuery.sizeOf(context).width * 0.82, 720),
+            ),
               ),
               child: SizedBox(
                 width: double.infinity,
@@ -6765,7 +6855,10 @@ class _HomePageState extends State<HomePage>
             alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+                maxWidth: math.max(
+              260,
+              math.min(MediaQuery.sizeOf(context).width * 0.82, 720),
+            ),
               ),
               child: Column(
                 crossAxisAlignment: align,
@@ -9301,7 +9394,8 @@ class _GlassInputBarState extends State<_GlassInputBar> {
     // 同步估算行数（1~5 行）：TextPainter 纯计算，不触发布局。
     // 宽度与激活态输入框内容宽度一致；行高取实际排版度量，
     // 避免估算偏差导致文字在框内被截断
-    final containerWidth = (MediaQuery.sizeOf(context).width - _hMargin * 2)
+    final containerWidth = math
+        .min(MediaQuery.sizeOf(context).width - _hMargin * 2, 760.0)
         .clamp(0.0, double.infinity);
     final fieldWidth = (containerWidth - _edgePadding * 2).clamp(
       0.0,
@@ -9352,7 +9446,8 @@ class _GlassInputBarState extends State<_GlassInputBar> {
         : 0.0;
     final keyboardInset = rawInset;
     // 宽度保护：布局早期 MediaQuery 宽度可能为 0，防止负宽度崩溃
-    final containerWidth = (MediaQuery.sizeOf(context).width - _hMargin * 2)
+    final containerWidth = math
+        .min(MediaQuery.sizeOf(context).width - _hMargin * 2, 760.0)
         .clamp(0.0, double.infinity);
 
     // 输入栏水平：初始长度 = 按钮圆心距离 - 圆角直径；激活拉满（留边距）
@@ -11540,7 +11635,10 @@ class _InlineMessageEditorState extends State<_InlineMessageEditor> {
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: math.max(260, MediaQuery.sizeOf(context).width * 0.82),
+          maxWidth: math.max(
+              260,
+              math.min(MediaQuery.sizeOf(context).width * 0.82, 720),
+            ),
         ),
         child: Container(
           padding: const EdgeInsets.all(10),

@@ -3492,6 +3492,60 @@ class _GeneralSettingsPageState extends State<_GeneralSettingsPage> {
               const SizedBox(height: 12),
 
               // ── 交互 ──
+              // 显示模式（自动：短边 ≥600dp 判平板；平板=双栏布局+自由旋转）
+              Material(
+                color: _buttonColor(context),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.devices_other,
+                            size: 18,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '显示模式',
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '平板模式为双栏布局（侧栏常驻）并允许横屏；'
+                        '手机模式保持竖屏单栏',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SegmentedButton<int>(
+                        segments: const [
+                          ButtonSegment(
+                            value: 0,
+                            label: Text('自动'),
+                          ),
+                          ButtonSegment(value: 1, label: Text('手机')),
+                          ButtonSegment(value: 2, label: Text('平板')),
+                        ],
+                        selected: {_s.displayMode},
+                        onSelectionChanged: (v) => _update(
+                          (s) => s.copyWith(displayMode: v.first),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
               _switchTile(
                 context,
                 icon: Icons.keyboard_double_arrow_down,
